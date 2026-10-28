@@ -194,6 +194,8 @@ async fn future_release_deliver_by_and_priority() {
     let mut mx = Client::smtp(env.mx).await;
     let ehlo = mx.cmd("EHLO relay.example").await;
     assert!(ehlo.contains("DELIVERBY 60") && ehlo.contains("MT-PRIORITY MIXER") && ehlo.contains("NO-SOLICITING") && !ehlo.contains("FUTURERELEASE"), "{ehlo}");
+    // RFC 9422: the per-connection and per-transaction limits are announced.
+    assert!(ehlo.contains("250-LIMITS MAILMAX=100 RCPTMAX="), "{ehlo}");
     assert!(mx.cmd("MAIL FROM:<x@remote.example> HOLDFOR=60").await.starts_with("555"));
 
     let mut c = Client::connect(env.submission).await;

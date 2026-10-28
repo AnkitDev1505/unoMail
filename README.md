@@ -25,7 +25,7 @@ and built-in spam and virus filtering. Written in Rust and React.
 
 **Mail server**
 - SMTP with DKIM signing, SPF/DKIM/DMARC/ARC verification, SRS, DSN, MTA-STS and DANE
-- IMAP4rev1 and IMAP4rev2 (IDLE, CONDSTORE/QRESYNC, ACL, QUOTA, SORT/THREAD, BINARY, COMPRESS…), POP3, ManageSieve, LMTP
+- IMAP4rev1 and IMAP4rev2 (IDLE, CONDSTORE/QRESYNC, ACL, QUOTA, SORT/THREAD, BINARY, COMPRESS, METADATA, NOTIFY, REPLACE…), POP3, ManageSieve, LMTP
 - JMAP (RFC 8620/8621) including WebSocket push, delayed send and undo, plus JMAP for
   quotas, Sieve scripts, contacts, calendars, blob management and sharing principals
 - REQUIRETLS (RFC 8689) for mail that must never travel unencrypted

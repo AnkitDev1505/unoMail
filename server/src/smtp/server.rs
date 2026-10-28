@@ -327,6 +327,8 @@ impl Session {
             lines.push(format!("AUTH PLAIN LOGIN{oauth}"));
         }
         lines.push("ENHANCEDSTATUSCODES".into());
+        // RFC 9422: what a client may send before being refused.
+        lines.push(format!("LIMITS MAILMAX={MAX_MESSAGES_PER_CONNECTION} RCPTMAX={}", self.app.rt().max_recipients));
         // RFC 2852: the shortest BY= time we accept, in seconds.
         lines.push(format!("DELIVERBY {MIN_DELIVER_BY}"));
         // RFC 6710 (honoured for signed-in senders), RFC 3865 (no keywords are refused).

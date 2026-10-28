@@ -165,6 +165,15 @@ impl Conn {
         }
     }
 
+    /// Waits until the peer has sent something (IMAP NOTIFY: a command is arriving). Nothing is
+    /// consumed, so it may be cancelled at any point.
+    pub async fn wait_readable(&mut self) -> Result<(), ReadError> {
+        while self.buf.is_empty() {
+            self.fill().await?;
+        }
+        Ok(())
+    }
+
     /// Reads one line with the trailing CRLF (or bare LF) removed.
     pub async fn read_line(&mut self, max: usize) -> Result<Vec<u8>, ReadError> {
         let mut line = self.read_line_raw(max).await?;

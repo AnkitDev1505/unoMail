@@ -222,7 +222,8 @@ impl Store {
         self.changes.subscribe()
     }
 
-    fn notify(&self, account_id: i64, mailbox_id: i64) {
+    /// Tells IDLE/NOTIFY sessions and push subscribers that a mailbox changed.
+    pub fn notify(&self, account_id: i64, mailbox_id: i64) {
         let _ = self.changes.send(Change { account_id, mailbox_id });
     }
 

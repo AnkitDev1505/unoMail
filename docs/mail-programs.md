@@ -42,11 +42,12 @@ replaces only the password; the second step is still required.
 
 IMAP4rev1 and IMAP4rev2. Extensions: `IDLE`, `MOVE`, `UIDPLUS`, `CONDSTORE`, `QRESYNC`,
 `ACL`, `SPECIAL-USE`, `QUOTA`, `SORT`, `THREAD=ORDEREDSUBJECT`, `THREAD=REFERENCES`,
-`ESEARCH`, `LIST-EXTENDED`, `LIST-STATUS`, `STATUS=SIZE`, `BINARY`, `COMPRESS=DEFLATE`.
+`ESEARCH`, `LIST-EXTENDED`, `LIST-STATUS`, `STATUS=SIZE`, `BINARY`, `COMPRESS=DEFLATE`,
+`METADATA`, `NOTIFY`, `REPLACE`.
 
 ### SMTP
 
-Extensions: `DSN`, `CHUNKING`, `SIZE`, `8BITMIME`, `SMTPUTF8`, `PIPELINING`, `REQUIRETLS`.
+Extensions: `DSN`, `CHUNKING`, `SIZE`, `8BITMIME`, `SMTPUTF8`, `PIPELINING`, `REQUIRETLS`, `LIMITS`.
 
 - Outbound STARTTLS is opportunistic unless DANE, MTA-STS or the *Require verified TLS for outgoing mail* server setting requires it.
 - `REQUIRETLS` messages bounce if no verified TLS path exists.

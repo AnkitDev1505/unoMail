@@ -1,6 +1,7 @@
 //! IMAP4rev1 (RFC 3501) and IMAP4rev2 (RFC 9051) server over implicit TLS (port 993) or STARTTLS (port 143), with the
 //! IDLE, MOVE, UIDPLUS, LITERAL+, SASL-IR, NAMESPACE, UNSELECT, SPECIAL-USE, ID, ENABLE, CONDSTORE, QRESYNC, QUOTA,
-//! SORT, THREAD, ESEARCH, LIST-EXTENDED, LIST-STATUS, STATUS=SIZE, BINARY and COMPRESS=DEFLATE extensions. Mailbox
+//! SORT, THREAD, ESEARCH, LIST-EXTENDED, LIST-STATUS, STATUS=SIZE, BINARY, COMPRESS=DEFLATE, METADATA, NOTIFY and
+//! REPLACE extensions. Mailbox
 //! names use modified UTF-7 on the wire (RFC 3501 section 5.1.3) until a client enables IMAP4rev2, then UTF-8.
 
 use std::{net::SocketAddr, time::Duration};
@@ -18,6 +19,8 @@ use crate::{
 };
 
 pub mod fetch;
+mod metadata;
+mod notify;
 pub mod parse;
 
 use fetch::Section;
@@ -25,7 +28,7 @@ use parse::{Arg, SequenceSet, Tokenizer, list_match, string, uid_set, utf7_decod
 
 const CAPABILITIES: &str = "IMAP4rev1 IMAP4rev2 LITERAL+ SASL-IR AUTH=PLAIN IDLE NAMESPACE ACL UIDPLUS MOVE UNSELECT CHILDREN SPECIAL-USE ID ENABLE CONDSTORE QRESYNC \
      QUOTA QUOTA=RES-STORAGE SORT SORT=DISPLAY ESORT THREAD=ORDEREDSUBJECT THREAD=REFERENCES ESEARCH SEARCHRES PARTIAL WITHIN LIST-EXTENDED LIST-STATUS \
-     STATUS=SIZE BINARY COMPRESS=DEFLATE MULTIAPPEND UTF8=ACCEPT UNAUTHENTICATE PREVIEW OBJECTID UIDONLY UIDBATCHES SAVELIMIT=100000";
+     STATUS=SIZE BINARY COMPRESS=DEFLATE MULTIAPPEND UTF8=ACCEPT UNAUTHENTICATE PREVIEW OBJECTID UIDONLY UIDBATCHES SAVELIMIT=100000 METADATA NOTIFY REPLACE";
 /// RFC 9738: COPY and APPEND of more messages than this are refused as a whole. (Not the
 /// MESSAGELIMIT variant, which would cut off FETCH and SEARCH results for clients unaware of it.)
 const SAVE_LIMIT: usize = 100_000;
@@ -79,6 +82,8 @@ struct Session {
     uid_only: bool,
     /// SEARCHRES (RFC 5182): the UIDs the last SEARCH RETURN (SAVE) found, used as `$`.
     saved: Vec<u32>,
+    /// NOTIFY (RFC 5465): what the client asked to hear about.
+    notify: Option<notify::Notify>,
 }
 
 enum Flow {
@@ -541,18 +546,27 @@ impl Session {
     async fn read_command(&mut self) -> Result<Option<Vec<Arg>>, ReadError> {
         let mut tokenizer = Tokenizer::default();
         let mut first = true;
-        let mut append = false;
+        let mut limit = MAX_SMALL_LITERAL;
         loop {
             let line = self.conn.read_line(MAX_LINE).await?;
             if first {
-                // Only APPEND may carry a message-sized literal.
-                append = line.splitn(3, |b| *b == b' ').nth(1).is_some_and(|c| c.eq_ignore_ascii_case(b"APPEND"));
+                // Only APPEND and REPLACE may carry a message-sized literal, SETMETADATA a larger value.
+                let words: Vec<&[u8]> = line.splitn(4, |b| *b == b' ').skip(1).take(2).collect();
+                let command: &[u8] = match words.as_slice() {
+                    [uid, command] if uid.eq_ignore_ascii_case(b"UID") => command,
+                    [command, ..] => command,
+                    [] => b"",
+                };
+                if command.eq_ignore_ascii_case(b"APPEND") || command.eq_ignore_ascii_case(b"REPLACE") {
+                    limit = self.app.rt().max_message_size;
+                } else if command.eq_ignore_ascii_case(b"SETMETADATA") {
+                    limit = metadata::MAX_VALUE;
+                }
                 first = false;
             }
             match tokenizer.feed(&line) {
                 Ok(None) => return Ok(tokenizer.finish().ok()),
                 Ok(Some(literal)) => {
-                    let limit = if append { self.app.rt().max_message_size } else { MAX_SMALL_LITERAL };
                     if literal.len > limit || (self.account.is_none() && literal.len > 1024) {
                         // The announced data would otherwise be parsed as commands.
                         self.line("* BYE literal too large").await?;
@@ -581,7 +595,12 @@ impl Session {
                 return self.line("* BYE too many errors").await;
             }
             self.conn.timeout = if self.account.is_some() { SESSION_TIMEOUT } else { LOGIN_TIMEOUT };
-            let args = match self.read_command().await {
+            // Under NOTIFY, changes are reported while the client is quiet.
+            let read = match self.await_command().await {
+                Ok(()) => self.read_command().await,
+                Err(err) => Err(err),
+            };
+            let args = match read {
                 Ok(Some(args)) => args,
                 Ok(None) => {
                     self.errors += 1;
@@ -751,7 +770,11 @@ impl Session {
                 }
             }
             "STATUS" => self.cmd_status(args).await?,
-            "APPEND" => self.cmd_append(args).await,
+            "APPEND" => self.cmd_append(args, false).await,
+            "REPLACE" => self.cmd_replace(args, false).await?,
+            "GETMETADATA" => self.cmd_getmetadata(args).await?,
+            "SETMETADATA" => self.cmd_setmetadata(args).await,
+            "NOTIFY" => self.cmd_notify(args).await?,
             "IDLE" => return Ok((self.cmd_idle().await?, Flow::Continue)),
             _ if self.selected.is_none() => bad("no mailbox selected or unknown command"),
             "CLOSE" => {
@@ -784,6 +807,7 @@ impl Session {
                     Some("THREAD") => self.cmd_thread(rest, true).await?,
                     Some("COPY") => self.cmd_copy(rest, true, false).await,
                     Some("MOVE") => self.cmd_copy(rest, true, true).await,
+                    Some("REPLACE") => self.cmd_replace(rest, true).await?,
                     Some("EXPUNGE") => match self.sequence_arg(rest.first(), true) {
                         Some((set, _)) => self.expunge(Some(set), false).await,
                         None => bad("usage: UID EXPUNGE set"),
@@ -1123,6 +1147,8 @@ impl Session {
                     .execute(&store.db)
                     .await
                     .map_err(internal)?;
+                // NOTIFY sessions report SubscriptionChange.
+                store.notify(account, mailbox.id);
             }
         }
         Ok(format!("{command} completed"))
@@ -1351,7 +1377,7 @@ impl Session {
 
     /// APPEND, with several messages at once (MULTIAPPEND, RFC 3502: all or none) and
     /// UTF-8 messages (`UTF8 (literal)`, RFC 6855).
-    async fn cmd_append(&mut self, args: &[Arg]) -> CmdResult {
+    async fn cmd_append(&mut self, args: &[Arg], single: bool) -> CmdResult {
         /// Flags, keywords, internal date and the literal of one message.
         type Appended<'a> = (Flags, Vec<String>, Option<i64>, &'a [u8]);
         let mailbox = self.find_mailbox(args.first().and_then(Arg::text), "i").await?;
@@ -1389,7 +1415,7 @@ impl Session {
             }
             i += 1;
         }
-        if messages.is_empty() {
+        if messages.is_empty() || (single && messages.len() > 1) {
             return bad("usage: APPEND mailbox [flags] [date] literal");
         }
         if messages.len() > SAVE_LIMIT {
@@ -1436,28 +1462,38 @@ impl Session {
     /// in `expunged`, so only what changed since the last sync is read: nothing at all when the
     /// mod-sequence did not move.
     async fn sync(&mut self) -> std::io::Result<()> {
-        let Some(selected) = &mut self.selected else { return Ok(()) };
-        let Ok(mailbox) = self.app.store.mailbox(selected.mailbox.account_id, selected.mailbox.id).await else { return Ok(()) };
+        self.sync_with(true).await.map(drop)
+    }
+
+    /// [`Self::sync`], optionally holding back expunges (NOTIFY SELECTED-DELAYED reports them
+    /// only after a command). Returns the UIDs of the messages that arrived.
+    async fn sync_with(&mut self, expunges: bool) -> std::io::Result<Vec<u32>> {
+        let Some(selected) = &mut self.selected else { return Ok(Vec::new()) };
+        let Ok(mailbox) = self.app.store.mailbox(selected.mailbox.account_id, selected.mailbox.id).await else { return Ok(Vec::new()) };
         if mailbox.highest_modseq == selected.synced_modseq {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let since = selected.synced_modseq;
         let (Ok(gone), Ok(current)) = (self.app.store.expunged_since(mailbox.id, since).await, self.app.store.messages_changed_since(mailbox.id, since).await) else {
-            return Ok(());
+            return Ok(Vec::new());
         };
-        // Read after the mailbox row: anything newer is simply looked at again next time.
-        selected.synced_modseq = mailbox.highest_modseq;
-        selected.mailbox = mailbox;
         let gone: std::collections::HashSet<i64> = gone.into_iter().collect();
         // A message moved away and back has a new UID; its old one is in `gone`.
         let present: std::collections::HashSet<i64> = current.iter().map(|m| m.uid).collect();
+        let held_back = !expunges && selected.messages.iter().any(|m| gone.contains(&m.uid) && !present.contains(&m.uid));
+        // Read after the mailbox row: anything newer is simply looked at again next time. Held
+        // back expunges keep the old mark, so the next sync finds them again.
+        if !held_back {
+            selected.synced_modseq = mailbox.highest_modseq;
+        }
+        selected.mailbox = mailbox;
         let mut out = String::new();
         let mut vanished = Vec::new();
         // Expunges are reported from the highest sequence number down, so earlier numbers
         // in the same batch stay valid.
         for index in (0..selected.messages.len()).rev() {
             let uid = selected.messages[index].uid;
-            if gone.contains(&uid) && !present.contains(&uid) {
+            if expunges && gone.contains(&uid) && !present.contains(&uid) {
                 let removed = selected.messages.remove(index);
                 if self.qresync || self.uid_only {
                     vanished.push(removed.uid);
@@ -1485,6 +1521,7 @@ impl Session {
                 None => added.push(new),
             }
         }
+        let arrived: Vec<u32> = added.iter().map(|m| m.uid as u32).collect();
         if !added.is_empty() {
             selected.messages.extend(added);
             selected.messages[known..].sort_by_key(|m| m.uid);
@@ -1495,7 +1532,10 @@ impl Session {
             let modseq = if self.condstore { format!(" MODSEQ ({})", message.modseq) } else { String::new() };
             out.push_str(&format!("{}FLAGS ({}) UID {}{modseq})\r\n", fetch_head(self.uid_only, index, message.uid), flags_text(message), message.uid));
         }
-        if out.is_empty() { Ok(()) } else { self.send(out.as_bytes()).await }
+        if !out.is_empty() {
+            self.send(out.as_bytes()).await?;
+        }
+        Ok(arrived)
     }
 
     /// Indexes (0-based sequence positions) of the selected messages addressed by `set`.
@@ -2228,6 +2268,36 @@ impl Session {
         Ok(format!("[COPYUID {} {} {}] {name} completed", target.uid_validity, source_uids.join(","), target_uids.join(",")))
     }
 
+    /// REPLACE (RFC 8508): APPEND a new version of one message, then expunge the old one.
+    async fn cmd_replace(&mut self, args: &[Arg], uid: bool) -> std::io::Result<CmdResult> {
+        let Some(selected) = &self.selected else { return Ok(bad("no mailbox selected")) };
+        if selected.read_only {
+            return Ok(no("mailbox is read-only"));
+        }
+        if !(self.may('t') && self.may('e')) {
+            return Ok(no("[NOPERM] you may not remove messages from this mailbox"));
+        }
+        let Some((set, uid)) = self.sequence_arg(args.first(), uid) else { return Ok(bad("invalid sequence set")) };
+        let single = matches!(set.0.as_slice(), [(a, b)] if a == b && *a != u32::MAX);
+        let targets = self.resolve(&set, uid);
+        let (true, [index]) = (single, targets.as_slice()) else {
+            return Ok(if single { no("no such message") } else { bad("REPLACE takes exactly one message") });
+        };
+        let Some(old) = self.selected.as_ref().and_then(|s| s.messages.get(*index).cloned()) else { return Ok(no("no such message")) };
+        let appended = match self.cmd_append(&args[1..], true).await {
+            Ok(text) => text,
+            Err(err) => return Ok(Err(err)),
+        };
+        // The new version is stored; only then does the old one go.
+        match self.app.store.delete_message(self.owner(), old.id).await {
+            Ok(()) | Err(StoreError::NotFound) => {}
+            Err(err) => return Ok(Err(internal(err))),
+        }
+        let code = appended.strip_suffix(" APPEND completed").unwrap_or(&appended);
+        self.line(&format!("* OK {code} replacement stored")).await?;
+        Ok(Ok("REPLACE completed".into()))
+    }
+
     async fn cmd_idle(&mut self) -> std::io::Result<CmdResult> {
         self.line("+ idling").await?;
         let mut changes = self.app.store.subscribe();
@@ -2259,6 +2329,9 @@ impl Session {
                         return Ok(bad("server shutting down"));
                     }
                     self.sync().await?;
+                    if self.notify.is_some() {
+                        self.notify_change(change.ok()).await?;
+                    }
                 }
             }
         }
@@ -2280,7 +2353,7 @@ async fn handle(app: AppState, tcp: TcpStream, peer: SocketAddr, starttls: bool)
             }
         }
     };
-    let session = Session { app, conn, peer, account: None, grant: None, selected: None, errors: 0, login_failures: 0, condstore: false, qresync: false, oauth: false, rev2: false, utf8: false, uid_only: false, saved: Vec::new() };
+    let session = Session { app, conn, peer, account: None, grant: None, selected: None, errors: 0, login_failures: 0, condstore: false, qresync: false, oauth: false, rev2: false, utf8: false, uid_only: false, saved: Vec::new(), notify: None };
     if let Err(err) = session.run().await {
         tracing::debug!(%err, %peer, "IMAP session ended with an error");
     }
