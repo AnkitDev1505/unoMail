@@ -25,6 +25,8 @@ use wasmi::{Caller, Config, Engine, Linker, Module, Store, StoreLimits, StoreLim
 use super::{Installed, manifest};
 
 const MAX_MEMORY: usize = 64 * 1024 * 1024;
+/// Tables live outside the memory limit, so they have their own.
+const MAX_TABLE_ELEMENTS: usize = 64 * 1024;
 const MAX_MESSAGE: usize = 1024 * 1024;
 const MAX_KV_BYTES: i64 = 1024 * 1024;
 const MAX_USER_KV_BYTES: i64 = 256 * 1024;
@@ -408,7 +410,7 @@ pub async fn invoke(app: &crate::app::App, call: Call) -> Result<Value, String> 
         user_settings: call.user_settings,
         deadline: Instant::now() + call.purpose.deadline(),
         runtime: tokio::runtime::Handle::current(),
-        limits: StoreLimitsBuilder::new().memory_size(MAX_MEMORY).instances(1).memories(1).tables(4).build(),
+        limits: StoreLimitsBuilder::new().memory_size(MAX_MEMORY).table_elements(MAX_TABLE_ELEMENTS).instances(1).memories(1).tables(4).build(),
         pending: Vec::new(),
         memory: None,
     };

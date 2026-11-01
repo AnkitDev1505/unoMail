@@ -307,6 +307,13 @@ pub async fn process_incoming(app: &App, account_id: i64, author: &str, raw: &[u
             if sequence(Some(event)) < sequence(ical::master(&stored)) {
                 return;
             }
+            // Just one occurrence changed: the rest of the series stays.
+            if occurrence.is_some() {
+                let Ok(data) = ical::merge_occurrences(&object.data, &text) else { return };
+                return if let Err(err) = store::put_object(&app.db, &calendar, &object.name, &data).await {
+                    tracing::warn!(%err, account = %me.email, "could not apply a calendar message");
+                };
+            }
             let Some(data) = ical::split_objects(&text).ok().and_then(|objects| objects.into_iter().next()) else { return };
             store::put_object(&app.db, &calendar, &object.name, &data).await.map(|_| ())
         }

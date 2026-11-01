@@ -90,6 +90,8 @@ fn store_error(err: StoreError) -> Value {
 
 pub async fn set(ctx: &mut Context<'_>, args: &Map<String, Value>) -> MethodResult {
     let old_state = ctx.state().await?;
+    super::objects::check_state(args, &old_state)?;
+    super::objects::check_size(args)?;
     let store = &ctx.app.store;
     let account = ctx.account.id;
     let (mut created, mut not_created) = (Map::new(), Map::new());
@@ -130,6 +132,7 @@ pub async fn set(ctx: &mut Context<'_>, args: &Map<String, Value>) -> MethodResu
                         .bind(account)
                         .execute(&store.db)
                         .await?;
+                    store.mailbox_changed(account, mailbox_id).await?;
                 }
                 Ok::<_, StoreError>(())
             }

@@ -2,9 +2,9 @@
 # unoMail: mail server, web client, admin panel, Rspamd and ClamAV in one container.
 
 # --- Web UI -------------------------------------------------------------------------------
-FROM node:25-alpine AS web
+FROM node:24-alpine AS web
 WORKDIR /build
-# Node 25+ no longer ships corepack; npm installs the pinned pnpm on any version.
+# npm installs the pinned pnpm on any version; later Node releases no longer ship corepack.
 RUN npm install -g pnpm@11.1.2
 COPY web/package.json web/pnpm-lock.yaml* ./
 RUN pnpm install --frozen-lockfile
@@ -56,8 +56,8 @@ ENV UNOMAIL_DATA_DIR=/data/unomail \
     S6_KEEP_ENV=1
 
 VOLUME /data
-# SMTP, HTTP (ACME + redirect), IMAP (STARTTLS), HTTPS, SMTPS, submission, IMAPS, POP3S
-EXPOSE 25 80 143 443 465 587 993 995
+# SMTP, HTTP (ACME + redirect), IMAP (STARTTLS), HTTPS, SMTPS, submission, ManageSieve, IMAPS, POP3S
+EXPOSE 25 80 143 443 465 587 4190 993 995
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD wget -q -O /dev/null http://127.0.0.1:80/health || exit 1
+    CMD host="${UNOMAIL_BIND:-127.0.0.1}"; case "$host" in 0.0.0.0|::) host=127.0.0.1 ;; esac; wget -q -O /dev/null "http://$host:${UNOMAIL_HTTP_PORT:-80}/health" || exit 1
 ENTRYPOINT ["/init"]

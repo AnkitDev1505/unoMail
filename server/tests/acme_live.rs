@@ -43,7 +43,7 @@ async fn issues_and_renews_a_certificate_with_http01_validation() {
 
     // Pebble's validation authority connects to port 5002 for HTTP-01.
     let challenge_listener = TcpListener::bind("0.0.0.0:5002").await.expect("port 5002 must be free");
-    tokio::spawn(http::serve(challenge_listener, api::redirect_router(app.clone()), None));
+    tokio::spawn(http::serve(challenge_listener, api::redirect_router(app.clone()), None, Vec::new()));
     let smtps = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let smtps_addr = smtps.local_addr().unwrap();
     tokio::spawn(server::serve(app.clone(), Mode::Smtps, smtps));

@@ -209,7 +209,7 @@ pub async fn passkey_login(State(state): State<AppState>, ClientIp(ip): ClientIp
     if !state.limiter.attempt(&account.email, ip) {
         return Err(ApiError::RateLimited);
     }
-    state.limiter.forgive(&account.email, ip);
+    state.limiter.clear(&account.email, ip);
     let (token, csrf_token) = super::auth::start_session(&state, &account, ip, &headers).await?;
     crate::db::audit(&state.db, &account.email, "login.success", "web", &ip.to_string(), "passkey").await;
     let jar = super::auth::issue_session(&state, jar, token, &account).await?;
@@ -260,7 +260,7 @@ pub async fn second_factor(State(state): State<AppState>, ClientIp(ip): ClientIp
         return Err(ApiError::Conflict(if passkey.is_some() { "that did not work; try again".into() } else { "the code is not correct".into() }));
     }
     PENDING.remove(&key);
-    state.limiter.forgive(&account.email, ip);
+    state.limiter.clear(&account.email, ip);
     let (token, csrf_token) = super::auth::start_session(&state, &account, ip, &headers).await?;
     let how = if input.code.is_some() { "totp" } else if input.recovery_code.is_some() { "recovery code" } else { "passkey" };
     crate::db::audit(&state.db, &account.email, "login.success", "web", &ip.to_string(), how).await;
@@ -589,9 +589,13 @@ pub async fn app_password_delete(State(state): State<AppState>, session: Session
 /// link to a single sign-on identity: the next identity to sign in with the address is linked.
 pub async fn admin_reset(State(state): State<AppState>, session: Session, Path(id): Path<i64>) -> JsonResult<Value> {
     session.require_admin()?;
+    // No password is asked here: a borrowed session must not be able to strip its own account.
+    if id == session.account.id {
+        return Err(ApiError::bad("change your own second factors in your security settings"));
+    }
     let account = super::accounts::load_managed(&state, &session, id).await?;
     let mut tx = state.db.begin().await?;
-    for table in ["totp_secrets", "passkeys", "recovery_codes", "app_passwords", "sessions", "oauth_links"] {
+    for table in ["totp_secrets", "passkeys", "recovery_codes", "app_passwords", "sessions", "oauth_links", "masked_integration_tokens"] {
         sqlx::query(sqlx::AssertSqlSafe(format!("DELETE FROM {table} WHERE account_id = ?"))).bind(account.id).execute(&mut *tx).await?;
     }
     crate::jmap::submission::cancel_pending(&mut *tx, account.id).await?;

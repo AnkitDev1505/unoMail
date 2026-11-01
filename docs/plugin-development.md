@@ -511,7 +511,7 @@ A minimal module in Rust (`cargo build --release --target wasm32-unknown-unknown
 ```rust
 use serde_json::{json, Value};
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn alloc(len: i32) -> i32 {
     let mut buffer = Vec::<u8>::with_capacity(len as usize);
     let ptr = buffer.as_mut_ptr();
@@ -520,7 +520,7 @@ pub extern "C" fn alloc(len: i32) -> i32 {
 }
 
 #[link(wasm_import_module = "unomail")]
-extern "C" {
+unsafe extern "C" {
     fn call(ptr: i32, len: i32) -> i32;
     fn reply(ptr: i32);
 }
@@ -760,7 +760,7 @@ The pieces a cloud storage plug-in usually needs, and where they come from:
 
 | Need | API |
 | --- | --- |
-| Which cloud server (self-hosted) | An admin `host` setting, e.g. `{ "key": "server", "type": "host", "scope": "admin" }` |
+| Which cloud server (self-hosted) | An admin `host` setting, e.g. `{ "key": "server", "type": "host", "scope": "admin" }`. Connections are allowed only once an administrator has saved a value; a `default` just fills in the form |
 | Signing the user in | `auth.start()` (OAuth), or user settings with a `secret` app password |
 | Save an attachment to the cloud | `message.getAttachments()` + `message.getAttachment(id)` → `fetch(PUT)` to the cloud |
 | Attach a cloud file | A panel or view with a file picker → `fetch(GET)` → `composer.addAttachment(blob, { name })` |

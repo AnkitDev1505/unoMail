@@ -49,6 +49,9 @@ pub async fn upload(ctx: &mut Context<'_>, args: &Map<String, Value>) -> MethodR
     let mut not_created = Map::new();
     for (key, spec) in &create {
         match build(ctx, spec, max).await? {
+            Ok(data) if !super::upload_fits(ctx.app, ctx.account, &crate::util::sha256_hex(&data), data.len()).await? => {
+                not_created.insert(key.clone(), set_error("overQuota", "not enough space left for this upload"));
+            }
             Ok(data) => {
                 let content_type = spec["type"].as_str().filter(|v| v.len() <= 100 && v.parse::<mime::Mime>().is_ok()).unwrap_or("application/octet-stream").to_owned();
                 let hash = ctx.app.store.put_blob(&data).await.map_err(MethodError::server)?;

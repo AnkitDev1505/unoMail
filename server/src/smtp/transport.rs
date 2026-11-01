@@ -300,7 +300,8 @@ pub fn dane_matches(records: &[Tlsa], end_entity: &[u8], intermediates: &[&[u8]]
     if !name_matches(&leaf, host) {
         return Err("the certificate is for another host");
     }
-    let chain: Vec<X509Certificate<'_>> = intermediates.iter().filter_map(|der| X509Certificate::from_der(der).ok().map(|(_, c)| c)).collect();
+    // Each certificate stays with its own bytes: unreadable ones are left out of the list.
+    let chain: Vec<(&[u8], X509Certificate<'_>)> = intermediates.iter().filter_map(|der| X509Certificate::from_der(der).ok().map(|(_, c)| (&der[..], c))).collect();
     let mut current = leaf;
     let mut current_der: &[u8] = end_entity;
     for _ in 0..8 {
@@ -308,9 +309,9 @@ pub fn dane_matches(records: &[Tlsa], end_entity: &[u8], intermediates: &[&[u8]]
         if anchored && current_der != end_entity {
             return Ok(());
         }
-        let Some(position) = chain.iter().position(|candidate| candidate.subject() == current.issuer() && current.verify_signature(Some(candidate.public_key())).is_ok()) else { break };
-        current_der = intermediates[position];
-        current = chain[position].clone();
+        let Some((der, issuer)) = chain.iter().find(|(_, candidate)| candidate.subject() == current.issuer() && current.verify_signature(Some(candidate.public_key())).is_ok()) else { break };
+        current_der = der;
+        current = issuer.clone();
     }
     Err("the certificate does not chain to the TLSA trust anchor")
 }

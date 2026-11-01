@@ -24,7 +24,10 @@ use crate::{
 };
 
 const IO_TIMEOUT: Duration = Duration::from_secs(120);
-const MAX_LINE: usize = 64 * 1024;
+/// Long enough for the answer to UID SEARCH ALL in a folder of a million messages.
+const MAX_LINE: usize = 16 * 1024 * 1024;
+/// All the text one command's answer may hold in memory, over and above a message's size.
+const MAX_ANSWER_TEXT: usize = 2 * MAX_LINE;
 const MAX_FOLDERS: usize = 500;
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -232,6 +235,15 @@ struct ImapClient {
 struct Response {
     text: String,
     literals: Vec<Vec<u8>>,
+    /// It carried a literal over the limit, which was read and thrown away.
+    oversized: bool,
+}
+
+const TOO_MUCH: &str = "the remote server sent too much data in one answer";
+
+/// The connection is fine and the server said no; anything else ends the import.
+fn is_refusal(err: &str) -> bool {
+    err.starts_with("the remote server refused")
 }
 
 fn quote(value: &str) -> Result<String, String> {
@@ -256,11 +268,14 @@ impl ImapClient {
     }
 
     async fn line(&mut self) -> Result<String, String> {
+        // What was looked through is not looked through again as more arrives.
+        let mut searched = 0;
         loop {
-            if let Some(pos) = self.buf.iter().position(|b| *b == b'\n') {
-                let line: Vec<u8> = self.buf.drain(..=pos).collect();
+            if let Some(pos) = self.buf[searched..].iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = self.buf.drain(..=searched + pos).collect();
                 return Ok(String::from_utf8_lossy(&line).trim_end().to_owned());
             }
+            searched = self.buf.len();
             if self.buf.len() > MAX_LINE {
                 return Err("the remote server sent an oversized line".into());
             }
@@ -279,14 +294,29 @@ impl ImapClient {
     async fn response(&mut self, max_literal: usize) -> Result<Response, String> {
         let mut text = String::new();
         let mut literals = Vec::new();
+        let mut oversized = false;
         loop {
             let line = self.line().await?;
             let literal = line.strip_suffix('}').and_then(|l| l.rsplit_once('{')).and_then(|(_, n)| n.parse::<usize>().ok());
             text.push_str(&line);
+            let held = text.len().saturating_add(literals.iter().map(Vec::len).sum());
+            if held > max_literal.saturating_add(MAX_ANSWER_TEXT) {
+                return Err(TOO_MUCH.into());
+            }
             match literal {
-                Some(n) if n > max_literal => return Err("the remote server announced an oversized message".into()),
+                Some(mut n) if n > max_literal => {
+                    oversized = true;
+                    while n > 0 {
+                        if self.buf.is_empty() {
+                            self.fill().await?;
+                        }
+                        let part = n.min(self.buf.len());
+                        self.buf.drain(..part);
+                        n -= part;
+                    }
+                }
                 Some(n) => literals.push(self.exact(n).await?),
-                None => return Ok(Response { text, literals }),
+                None => return Ok(Response { text, literals, oversized }),
             }
         }
     }
@@ -300,8 +330,13 @@ impl ImapClient {
             .map_err(|_| "the remote server stopped responding")?
             .map_err(|e| format!("connection error: {e}"))?;
         let mut responses = Vec::new();
+        let mut held = 0usize;
         loop {
             let response = self.response(max_literal).await?;
+            held = held.saturating_add(response.text.len()).saturating_add(response.literals.iter().map(Vec::len).sum());
+            if held > max_literal.saturating_add(MAX_ANSWER_TEXT) {
+                return Err(TOO_MUCH.into());
+            }
             if let Some(status) = response.text.strip_prefix(&format!("{tag} ")) {
                 if status.to_ascii_uppercase().starts_with("OK") {
                     return Ok(responses);
@@ -428,8 +463,14 @@ async fn run_imap(progress: &mut Progress, source: &ImapSource) -> Result<(), St
             _ => decoded,
         };
         let mailbox = progress.mailbox(&local_name, role_for(&local_name, &attributes)).await?;
-        if client.command(&format!("EXAMINE {}", quote(&remote_name)?), 4096).await.is_err() {
-            continue;
+        match client.command(&format!("EXAMINE {}", quote(&remote_name)?), 4096).await {
+            Ok(_) => {}
+            // A folder that cannot be opened is passed over, and counted.
+            Err(err) if is_refusal(&err) => {
+                progress.skipped += 1;
+                continue;
+            }
+            Err(err) => return Err(err),
         }
         let search = client.command("UID SEARCH ALL", 0).await?;
         let uids: Vec<u64> = search
@@ -441,12 +482,18 @@ async fn run_imap(progress: &mut Progress, source: &ImapSource) -> Result<(), St
             // Messages are fetched one at a time so memory use stays bounded by one message.
             let responses = match client.command(&format!("UID FETCH {uid} (FLAGS INTERNALDATE BODY.PEEK[])"), max.saturating_add(1024)).await {
                 Ok(responses) => responses,
-                Err(err) if err.contains("oversized message") => return Err(err),
-                Err(_) => {
+                Err(err) if is_refusal(&err) => {
                     progress.skipped += 1;
                     continue;
                 }
+                // A lost connection: the job must not end as if it were complete.
+                Err(err) => return Err(err),
             };
+            // A message too large to keep is passed over, like one the server refuses.
+            if responses.iter().any(|r| r.oversized) {
+                progress.skipped += 1;
+                continue;
+            }
             let Some(response) = responses.iter().find(|r| r.text.to_ascii_uppercase().contains(" FETCH (") && !r.literals.is_empty()) else {
                 progress.skipped += 1;
                 continue;
@@ -613,7 +660,7 @@ mod tests {
 
     #[test]
     fn list_and_fetch_parsing() {
-        let r = |text: &str| Response { text: text.into(), literals: vec![] };
+        let r = |text: &str| Response { text: text.into(), literals: vec![], oversized: false };
         assert_eq!(parse_list(&r("* LIST (\\HasNoChildren \\Sent) \"/\" \"Sent Items\"")), Some(("\\HasNoChildren \\Sent".into(), Some('/'), "Sent Items".into())));
         assert_eq!(parse_list(&r("* LIST () \".\" INBOX.Work")), Some(("".into(), Some('.'), "INBOX.Work".into())));
         assert_eq!(parse_list(&r("* LIST (\\Noselect) NIL Shared")), Some(("\\Noselect".into(), None, "Shared".into())));

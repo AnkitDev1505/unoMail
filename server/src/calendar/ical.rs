@@ -142,6 +142,7 @@ fn parse_line(line: &str) -> Option<Property> {
 
 /// Parses an iCalendar stream into its top-level `VCALENDAR` component.
 pub fn parse(text: &str) -> Result<Component, String> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     // Unfold: a line starting with a space or tab continues the previous one.
     let mut lines: Vec<String> = Vec::new();
     for raw in text.split('\n') {
@@ -230,7 +231,9 @@ pub fn moment_in(property: &Property, zone: Tz) -> Option<Moment> {
         naive.and_utc().timestamp()
     } else {
         let zone = property.param("TZID").and_then(|tzid| tzid.parse::<Tz>().ok()).unwrap_or(zone);
-        zone.from_local_datetime(&naive).earliest().map_or(naive.and_utc().timestamp(), |local| local.timestamp())
+        // A time the clocks skipped (RFC 5545: read with the offset before the gap) comes an hour on.
+        let shifted = naive.checked_add_signed(Duration::hours(1)).and_then(|later| zone.from_local_datetime(&later).earliest());
+        zone.from_local_datetime(&naive).earliest().or(shifted).map_or(naive.and_utc().timestamp(), |local| local.timestamp())
     };
     Some(Moment { at, all_day: false })
 }
@@ -241,6 +244,22 @@ pub fn moment(property: &Property) -> Option<Moment> {
 }
 
 /// Parses an RFC 5545 DURATION such as `PT1H30M`, `P1D` or `P2W` into seconds.
+/// The stored event with the occurrences `incoming` describes put in (a message about one
+/// occurrence holds only that one; taken for the whole event it would replace the series).
+pub fn merge_occurrences(stored: &str, incoming: &str) -> Result<String, String> {
+    let mut merged = parse(stored).map_err(|err| err.to_string())?;
+    let incoming = parse(incoming).map_err(|err| err.to_string())?;
+    for component in incoming.children.iter().filter(|c| c.name == "VEVENT") {
+        let Some(id) = component.value("RECURRENCE-ID").map(str::trim) else { continue };
+        merged.children.retain(|c| c.name != "VEVENT" || c.value("RECURRENCE-ID").map(str::trim) != Some(id));
+        merged.children.push(component.clone());
+    }
+    Ok(merged.serialize())
+}
+
+/// Longer than any real event (about 300 years); keeps date arithmetic in range.
+const MAX_DURATION_SECS: i64 = 10_000_000_000;
+
 pub fn duration_secs(value: &str) -> Option<i64> {
     let value = value.trim();
     let (sign, rest) = match value.strip_prefix('-') {
@@ -256,7 +275,7 @@ pub fn duration_secs(value: &str) -> Option<i64> {
             unit => {
                 let n: i64 = number.parse().ok()?;
                 number.clear();
-                total += n * match (unit, time) {
+                let unit_secs = match (unit, time) {
                     ('W', false) => 7 * 86400,
                     ('D', false) => 86400,
                     ('H', true) => 3600,
@@ -264,6 +283,7 @@ pub fn duration_secs(value: &str) -> Option<i64> {
                     ('S', true) => 1,
                     _ => return None,
                 };
+                total = total.checked_add(n.checked_mul(unit_secs)?).filter(|total| *total <= MAX_DURATION_SECS)?;
             }
         }
     }
@@ -480,7 +500,18 @@ fn recurrence_starts(master: &Component, start: Moment, from: i64, to: i64, zone
                     .map(|part| match part.split_once('=') {
                         Some((key, until)) if key.eq_ignore_ascii_case("UNTIL") => {
                             let until = until.trim();
-                            if until.len() == 8 { format!("UNTIL={until}T235959Z") } else if until.ends_with('Z') { format!("UNTIL={until}") } else { format!("UNTIL={until}Z") }
+                            // A value without a zone is on the clock of the event.
+                            let event_zone = dtstart.param("TZID").and_then(|tzid| tzid.parse::<Tz>().ok()).unwrap_or(zone);
+                            let local = |naive: NaiveDateTime| event_zone.from_local_datetime(&naive).earliest().map(|t| t.with_timezone(&Utc).format("%Y%m%dT%H%M%SZ").to_string());
+                            if until.ends_with('Z') {
+                                format!("UNTIL={until}")
+                            } else if until.len() == 8 {
+                                let end = if start.all_day { None } else { parse_date(until).and_then(|day| day.and_hms_opt(23, 59, 59)).and_then(local) };
+                                format!("UNTIL={}", end.unwrap_or_else(|| format!("{until}T235959Z")))
+                            } else {
+                                let end = NaiveDateTime::parse_from_str(until, "%Y%m%dT%H%M%S").ok().and_then(local);
+                                format!("UNTIL={}", end.unwrap_or_else(|| format!("{until}Z")))
+                            }
                         }
                         _ => part.to_owned(),
                     })
@@ -608,7 +639,7 @@ fn timing(input: &EventInput) -> Result<(Property, Property, Option<Property>), 
         }
         // iCalendar's end date is exclusive.
         start.value = first.format("%Y%m%d").to_string();
-        end.value = (last + Duration::days(1)).format("%Y%m%d").to_string();
+        end.value = last.checked_add_signed(Duration::days(1)).ok_or("invalid end date")?.format("%Y%m%d").to_string();
         for property in [&mut start, &mut end] {
             property.params.push(("VALUE".into(), "DATE".into()));
         }
@@ -632,7 +663,7 @@ fn timing(input: &EventInput) -> Result<(Property, Property, Option<Property>), 
     let rule = if rule.is_empty() {
         None
     } else {
-        if rule.len() > 300 || !rule.bytes().all(|b| b.is_ascii_alphanumeric() || b"=;,+-".contains(&b)) || !rule.starts_with("FREQ=") {
+        if rule.len() > 300 || !rule.bytes().all(|b| b.is_ascii_alphanumeric() || b"=;,+-".contains(&b)) || !rule.split(';').any(|part| part.starts_with("FREQ=")) {
             return Err("invalid recurrence rule".into());
         }
         // Let the recurrence library have the last word on whether the rule makes sense.
@@ -826,6 +857,17 @@ pub fn update_event(existing: &str, input: &EventInput, organizer: Option<&Organ
     apply(&mut calendar.children[index], input, organizer)?;
     let event = &mut calendar.children[index];
     bump_sequence(event);
+    // The form works in minutes and one zone. A value it gave back unchanged is the same moment,
+    // whatever it looks like: the original stays, and nothing counts as a change of time.
+    let zone: Tz = input.timezone.parse().unwrap_or(Tz::UTC);
+    let minute = |property: &Property| moment_in(property, zone).map(|m| (m.at.div_euclid(60), m.all_day));
+    for (name, old) in [("DTSTART", &before.0), ("DTEND", &before.1)] {
+        if let Some(old) = old
+            && event.prop(name).is_some_and(|new| minute(new).is_some() && minute(new) == minute(old))
+        {
+            event.set(Some(old.clone()), name);
+        }
+    }
     let after = timing(event);
     if before != after {
         if organizer.is_some_and(|me| self::organizer(event).as_deref() == Some(me.email)) {

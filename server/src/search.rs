@@ -160,6 +160,11 @@ pub async fn backfill(app: AppState) {
             // A content that cannot be read is recorded as empty, so it is not tried forever.
             let indexed = match app.store.read_blob(&hash).await {
                 Ok(raw) => extract(&raw, &hash),
+                // Storage trouble passes: the rest waits for the next run.
+                Err(crate::store::StoreError::Io(err)) => {
+                    tracing::warn!(%err, "could not read a message for indexing");
+                    return;
+                }
                 Err(_) => Indexed::default(),
             };
             if let Err(err) = store(&app.db, &hash, &indexed).await {

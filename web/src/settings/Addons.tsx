@@ -32,8 +32,12 @@ function Addon({ pkg, onChange }: { pkg: Available; onChange: () => void }) {
     setSaved(false);
     try {
       await put(`/api/me/packages/${encodeURIComponent(pkg.id)}`, withSettings ? { enabled, settings: values } : { enabled });
-      if (enabled && !pkg.user.enabled && account) await startPackages(account.email, [{ id: pkg.id, commit: pkg.commit, name: manifest.name, permissions: manifest.permissions ?? [] }]);
-      if (!enabled) stopPlugin(pkg.id);
+      // Started afresh from what the server says it may do: with the hosts an administrator
+      // named, and for an administrator's admin pages also when turned off here.
+      if (enabled !== pkg.user.enabled && account) {
+        stopPlugin(pkg.id);
+        await startPackages(account.email);
+      }
       if (withSettings) {
         settingsChanged(pkg.id);
         setSaved(true);

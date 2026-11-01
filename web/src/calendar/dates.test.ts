@@ -77,18 +77,20 @@ describe('calendar dates', () => {
     expect(describeRule('')).toEqual({ repeat: 'none', until: '' });
     expect(describeRule('FREQ=WEEKLY')).toEqual({ repeat: 'weekly', until: '' });
     expect(describeRule('RRULE:freq=weekly;byday=mo,tu,we,th,fr')).toEqual({ repeat: 'weekdays', until: '' });
-    expect(describeRule('FREQ=DAILY;UNTIL=20261231T235959Z')).toEqual({ repeat: 'daily', until: '2026-12-31' });
+    expect(describeRule(`FREQ=DAILY;UNTIL=${new Date(2026, 11, 31, 20).toISOString().replace(/[-:]|\.\d{3}/g, '')}`)).toEqual({ repeat: 'daily', until: '2026-12-31' });
     // Anything the editor cannot express is left alone rather than simplified.
     expect(describeRule('FREQ=MONTHLY;BYDAY=2TU')).toEqual({ repeat: 'custom', until: '' });
     expect(describeRule('FREQ=WEEKLY;COUNT=6')).toEqual({ repeat: 'custom', until: '' });
 
     expect(buildRule('none', '2026-12-31', false)).toBe('');
     expect(buildRule('monthly', '', false)).toBe('FREQ=MONTHLY');
-    expect(buildRule('daily', '2026-12-31', false)).toBe('FREQ=DAILY;UNTIL=20261231T235959Z');
+    const utcEnd = new Date(2026, 11, 31, 23, 59, 59).toISOString().replace(/[-:]|\.\d{3}/g, '');
+    expect(buildRule('daily', '2026-12-31', false)).toBe(`FREQ=DAILY;UNTIL=${utcEnd}`);
+    expect(describeRule(buildRule('daily', '2026-12-31', false))).toEqual({ repeat: 'daily', until: '2026-12-31' });
     expect(buildRule('yearly', '2030-01-01', true)).toBe('FREQ=YEARLY;UNTIL=20300101');
     expect(buildRule('weekly', 'garbage', false)).toBe('FREQ=WEEKLY');
     expect(buildRule('custom', '', false, 'FREQ=MONTHLY;BYDAY=2TU')).toBe('FREQ=MONTHLY;BYDAY=2TU');
-    for (const rule of ['FREQ=DAILY;UNTIL=20261231T235959Z', 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR']) {
+    for (const rule of [`FREQ=DAILY;UNTIL=${utcEnd}`, 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR']) {
       const { repeat, until } = describeRule(rule);
       expect(buildRule(repeat, until, false)).toBe(rule);
     }

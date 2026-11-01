@@ -133,9 +133,9 @@ Set by the image or used in tests.
 
 ## Runtime settings
 
-**Administration → Server settings** overrides the environment for greylisting, limits,
-blocklists, TLS policy, MTA-STS, DANE, reports and Trash/Junk retention (default 30 days).
-It also has settings with no variable:
+**Administration → Server settings** holds greylisting, limits, blocklists, TLS policy, MTA-STS,
+DANE, reports and Trash/Junk retention (default 30 days). These have no variable (see above for
+the old ones). It also has:
 
 | Section | Settings |
 | --- | --- |

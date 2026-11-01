@@ -55,7 +55,7 @@ export function Backups() {
   return (
     <>
       <PageHeader title={t('Backups')}>
-        <Button variant="contained" disabled={!data?.configured || running} onClick={() => void run(() => post('/api/backups').then(reload), t('Backup started'))}>
+        <Button variant="contained" disabled={!data?.configured || running} onClick={() => void run(() => post('/api/backups').then(reload).then(() => new Promise((done) => window.setTimeout(done, 1000))).then(reload), t('Backup started'))}>
           {running ? t('Backing up…') : t('Back up now')}
         </Button>
       </PageHeader>

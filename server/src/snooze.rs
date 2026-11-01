@@ -53,8 +53,15 @@ pub async fn snooze(app: &App, account_id: i64, message_id: i64, until: i64) -> 
 
 /// Brings a snoozed message back now: unread, on top of its folder.
 pub async fn wake(app: &App, account_id: i64, message_id: i64) -> Result<(), StoreError> {
-    let return_to: Option<i64> = sqlx::query_scalar("DELETE FROM snoozes WHERE message_id = ? AND account_id = ? RETURNING return_mailbox_id").bind(message_id).bind(account_id).fetch_optional(&app.db).await?;
+    let return_to: Option<i64> = sqlx::query_scalar("SELECT return_mailbox_id FROM snoozes WHERE message_id = ? AND account_id = ?").bind(message_id).bind(account_id).fetch_optional(&app.db).await?;
     let Some(return_to) = return_to else { return Err(StoreError::NotFound) };
+    bring_back(app, account_id, message_id, return_to).await?;
+    // Only now: should that fail, the next round tries again.
+    sqlx::query("DELETE FROM snoozes WHERE message_id = ? AND account_id = ?").bind(message_id).bind(account_id).execute(&app.db).await?;
+    Ok(())
+}
+
+async fn bring_back(app: &App, account_id: i64, message_id: i64, return_to: i64) -> Result<(), StoreError> {
     let message = match app.store.message(account_id, message_id).await {
         Ok(message) => message,
         Err(StoreError::NotFound) => return Ok(()),
@@ -94,8 +101,7 @@ pub async fn wake_due(app: &App) {
     let due: Vec<(i64, i64)> = sqlx::query_as("SELECT account_id, message_id FROM snoozes WHERE until <= ? LIMIT 500").bind(now()).fetch_all(&app.db).await.unwrap_or_default();
     for (account_id, message_id) in due {
         if let Err(err) = wake(app, account_id, message_id).await {
-            tracing::warn!(%err, message_id, "a snoozed message could not be brought back");
-            let _ = sqlx::query("DELETE FROM snoozes WHERE message_id = ?").bind(message_id).execute(&app.db).await;
+            tracing::warn!(%err, message_id, "a snoozed message could not be brought back; trying again");
         }
     }
 }

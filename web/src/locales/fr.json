@@ -2374,5 +2374,9 @@
   "A setup QR code is not available for this account: it cannot use both IMAP and SMTP, or its address is not plain ASCII.": "Aucun code QR de configuration n’est disponible pour ce compte : il ne peut pas utiliser à la fois IMAP et SMTP, ou son adresse n’est pas en ASCII simple.",
   "Set up Thunderbird for Android by scanning a code instead of typing the server details. With 2-step verification on, create an app password with mail access above and show its QR code.": "Configurez Thunderbird pour Android en scannant un code au lieu de saisir les informations du serveur. Avec la validation en deux étapes activée, créez ci-dessus un mot de passe d’application avec accès au courrier et affichez son code QR.",
   "Set up Thunderbird for Android by scanning a code instead of typing the server details. The code carries your password; an app password with mail access works too.": "Configurez Thunderbird pour Android en scannant un code au lieu de saisir les informations du serveur. Le code contient votre mot de passe ; un mot de passe d’application avec accès au courrier fonctionne aussi.",
-  "Show": "Afficher"
+  "Show": "Afficher",
+  "Finish or close the message you are writing first": "Terminez ou fermez d'abord le message en cours de rédaction",
+  "An encrypted message cannot be saved as a draft. Send it, or turn encryption off to keep it.": "Un message chiffré ne peut pas être enregistré comme brouillon. Envoyez-le, ou désactivez le chiffrement pour le conserver.",
+  "The server could not be reached. Please try again.": "Le serveur est injoignable. Veuillez réessayer.",
+  "The test event failed: {{status}}": "L'événement de test a échoué : {{status}}"
 }

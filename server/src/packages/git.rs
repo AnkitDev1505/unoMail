@@ -89,8 +89,18 @@ pub async fn resolve(url: &str, git_ref: &str, allow_local: bool) -> Result<Stri
     command.args(["ls-remote", "--", url, git_ref, &format!("{git_ref}^{{}}")]);
     let listing = run(command).await?;
     // An annotated tag lists the tag object and, with ^{}, the commit it points to.
-    let mut lines: Vec<(&str, &str)> = listing.lines().filter_map(|l| l.split_once('\t')).collect();
-    lines.sort_by_key(|(_, name)| !name.ends_with("^{}"));
+    // Listing matches by the end of the name (`x/main` for `main`): only the ref itself counts,
+    // with the precedence `git fetch` gives it.
+    let rank = |name: &str| {
+        if name == format!("refs/tags/{git_ref}^{{}}") { Some(0) }
+        else if name == format!("refs/tags/{git_ref}") { Some(1) }
+        else if name == format!("{git_ref}^{{}}") { Some(2) }
+        else if name == git_ref { Some(3) }
+        else if name == format!("refs/heads/{git_ref}") { Some(4) }
+        else { None }
+    };
+    let mut lines: Vec<(&str, &str)> = listing.lines().filter_map(|l| l.split_once('\t')).filter(|(_, name)| rank(name).is_some()).collect();
+    lines.sort_by_key(|(_, name)| rank(name));
     lines.into_iter().map(|(hash, _)| hash).find(|hash| is_commit(hash)).map(str::to_owned).ok_or_else(|| format!("no tag, branch or commit named {}", crate::util::sanitize_line(git_ref)))
 }
 

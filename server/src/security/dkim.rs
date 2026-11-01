@@ -126,6 +126,12 @@ fn generate(algorithm: Algorithm) -> anyhow::Result<(String, String)> {
     }
 }
 
+/// The selector a new domain's first key gets.
+pub fn default_selector() -> String {
+    let now = time::OffsetDateTime::now_utc();
+    format!("uno{}{:02}", now.year(), u8::from(now.month()))
+}
+
 pub async fn create_key(db: &SqlitePool, secrets: &SecretBox, domain_id: i64, selector: &str, algorithm: Algorithm) -> anyhow::Result<DkimKey> {
     anyhow::ensure!(is_valid_selector(selector), "invalid selector");
     let (private, public) = tokio::task::spawn_blocking(move || generate(algorithm)).await??;

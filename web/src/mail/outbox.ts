@@ -1,7 +1,7 @@
 // Offline outbox: changes and messages made without a connection are stored in the browser
 // and replayed in order once the server is reachable again.
 
-import { destroyEmails, type Draft, moveEmails, sendEmail, setKeyword } from './jmapClient';
+import { destroyEmails, type Draft, moveEmails, saveDraft, sendEmail, setKeyword } from './jmapClient';
 import { isPendingId, removePendingFiles } from './pendingFiles';
 
 import { t } from '../i18n';
@@ -11,7 +11,8 @@ export type OutboxAction =
   | { type: 'keyword'; ids: string[]; keyword: string; value: boolean }
   | { type: 'move'; ids: string[]; mailboxId: string }
   | { type: 'destroy'; ids: string[] }
-  | { type: 'send'; draft: Draft; draftsId: string; sentId: string };
+  // `sendAt` is the chosen time of a scheduled message; `previousDraftId` the copy it replaces.
+  | { type: 'send'; draft: Draft; draftsId: string; sentId: string; sendAt?: string; previousDraftId?: string };
 
 // Shares the cache prefix so that sign-out removes it together with cached mail.
 const PREFIX = 'unomail.cache.outbox.';
@@ -45,7 +46,7 @@ function execute(action: OutboxAction): Promise<unknown> {
     case 'destroy':
       return destroyEmails(action.ids);
     case 'send':
-      return sendEmail(action.draft, action.draftsId, action.sentId);
+      return sendEmail(action.draft, action.draftsId, action.sentId, action.previousDraftId, action.sendAt && new Date(action.sendAt) > new Date() ? { sendAt: new Date(action.sendAt) } : undefined);
   }
 }
 
@@ -107,6 +108,15 @@ let flushing = false;
 
 /** Replays queued actions in order. Stops at the first network failure. */
 export async function flushOutbox(): Promise<FlushResult> {
+  // The queue is shared by this browser's tabs: only one of them may work through it, or a
+  // message goes out twice and another action is dropped unseen.
+  const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+  if (!locks) return flushHere();
+  const result = await locks.request(`${key}.flush`, { ifAvailable: true }, (lock) => (lock ? flushHere() : null));
+  return result ?? { done: 0, rejected: [], remaining: pendingCount() };
+}
+
+async function flushHere(): Promise<FlushResult> {
   const result: FlushResult = { done: 0, rejected: [], remaining: pendingCount() };
   if (flushing || result.remaining === 0) return result;
   flushing = true;
@@ -121,6 +131,14 @@ export async function flushOutbox(): Promise<FlushResult> {
       } catch (err) {
         if (isNetworkError(err)) break;
         result.rejected.push(errorText(err, t('A queued change was refused')));
+        // The queue held the only copy of a message the server refused: it goes to Drafts.
+        if (next.type === 'send') {
+          try {
+            await saveDraft(next.draft, next.draftsId, next.previousDraftId);
+          } catch (saveError) {
+            if (isNetworkError(saveError)) break;
+          }
+        }
       }
       write(read().slice(1));
       release(next);

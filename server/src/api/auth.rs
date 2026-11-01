@@ -272,6 +272,7 @@ pub async fn change_password(State(state): State<AppState>, session: Session, Js
         .bind(&session.token_hash)
         .execute(&mut *tx)
         .await?;
+    sqlx::query("DELETE FROM masked_integration_tokens WHERE account_id = ?").bind(session.account.id).execute(&mut *tx).await?;
     if req.revoke_app_passwords {
         sqlx::query("DELETE FROM app_passwords WHERE account_id = ?").bind(session.account.id).execute(&mut *tx).await?;
     }

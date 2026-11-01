@@ -64,6 +64,18 @@ pub async fn mailbox(db: &SqlitePool, account: &Account, mailbox_id: i64) -> sql
     Ok(rights.contains('l').then_some((mailbox, rights)))
 }
 
+/// The accounts that can read something of `owner`'s, who hear about changes to it.
+pub async fn watchers(db: &SqlitePool, owner: i64) -> sqlx::Result<Vec<i64>> {
+    sqlx::query_scalar(
+        "SELECT DISTINCT g.id FROM mailbox_acl a JOIN mailboxes b ON b.id = a.mailbox_id JOIN accounts o ON o.id = b.account_id
+           JOIN accounts g ON g.id = a.grantee_id OR (a.grantee_id = 0 AND g.domain_id = o.domain_id)
+          WHERE b.account_id = ?1 AND g.id != ?1 AND instr(a.rights, 'r') > 0",
+    )
+    .bind(owner)
+    .fetch_all(db)
+    .await
+}
+
 /// A mailbox shared with an account, together with its owner's address.
 #[derive(Debug, Clone)]
 pub struct Shared {

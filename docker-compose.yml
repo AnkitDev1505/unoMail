@@ -10,9 +10,8 @@ services:
       # Leave unset to have a random password generated and printed once in the logs.
       # UNOMAIL_ADMIN_PASSWORD: change-me-to-a-long-passphrase
 
-      # Everything below is optional and shows the default. See docs/configuration.md.
-      # Settings marked (runtime) can also be changed under Administration -> Server settings,
-      # which overrides the environment.
+      # Everything below is optional; where a value is shown in place of "", it is an example.
+      # See docs/configuration.md. Most other settings are under Administration -> Server settings.
 
       # --- Web and TLS ---
       # UNOMAIL_PUBLIC_URL: https://mail.example.com    # default https://<hostname>
@@ -42,7 +41,7 @@ services:
 
       # --- Antivirus ---
       # CLAMAV_ENABLED: "true"                          # false on small hosts: the signature database needs well over 1 GB of memory
-      # UNOMAIL_CLAMAV_ADDR: ""                         # external clamd host:port instead of the bundled one
+      # UNOMAIL_CLAMAV_ADDR: ""                         # external clamd host:port; set CLAMAV_ENABLED to "false" as well to stop the bundled one
 
       # --- Outbound mail ---
       # Relay, required TLS and hourly limits: Administration > Server settings
@@ -78,11 +77,12 @@ services:
       - "587:587"
       - "993:993"
       - "995:995"
-      # - "4190:4190"   # ManageSieve
+      - "4190:4190"     # ManageSieve
     volumes:
       - unomail-data:/data
     cap_drop: [ALL]
-    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER, NET_BIND_SERVICE]
+    # KILL: the supervisor runs as root and stops services running under other users.
+    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER, KILL, NET_BIND_SERVICE]
     # Includes ClamAV's database and temporary reload copy; tune for mailbox load.
     mem_limit: 4g
     cpus: 2.0

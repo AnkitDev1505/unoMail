@@ -115,6 +115,8 @@ export interface NewestUnread {
 
 /** The newest unread message in the inbox (also what the service worker asks for). */
 const newestUnread = () => get<NewestUnread>('/api/me/newest-unread');
+/** Tells messages apart: a further one in the same conversation is news too. */
+const keyOf = (message: NewestUnread['message']) => (message ? `${message.threadId}:${message.subject}:${message.preview}` : null);
 
 /**
  * Notifications shown by the open tab, for accounts without Web Push: after each change it
@@ -124,14 +126,14 @@ const newestUnread = () => get<NewestUnread>('/api/me/newest-unread');
 export function pageNotifier(account: string, open: (threadId: string) => void): () => void {
   let last: string | null | undefined;
   // What is unread now is not news; only what arrives from here on.
-  void newestUnread().then((now) => (last = now.message?.threadId ?? null), () => (last = null));
+  void newestUnread().then((now) => (last = keyOf(now.message)), () => (last = null));
   return () => {
     if (!pageNotificationsOn(account) || last === undefined) return;
     void newestUnread().then((now) => {
       const message = now.message;
       const known = last;
-      last = message?.threadId ?? null;
-      if (!message || message.threadId === known || document.visibilityState === 'visible') return;
+      last = keyOf(message);
+      if (!message || last === known || document.visibilityState === 'visible') return;
       const notification = new Notification(message.from || t('New mail'), {
         body: [message.subject || t('(no subject)'), message.preview].filter(Boolean).join('\n'),
         tag: `unomail-${message.threadId}`,

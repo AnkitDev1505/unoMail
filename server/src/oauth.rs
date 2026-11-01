@@ -357,7 +357,7 @@ fn urlencode(value: &str) -> String {
 ///
 /// Goes through the same lockout, auditing and per-protocol switches as password logins.
 pub async fn authenticate_token(app: &App, user: &str, token: &str, ip: IpAddr, protocol: Protocol) -> Result<Account, AuthError> {
-    let user = user.trim().to_lowercase();
+    let user = crate::util::login_address(user);
     if user.len() > 320 || token.is_empty() || token.len() > 8192 {
         return Err(AuthError::Invalid);
     }
@@ -385,7 +385,12 @@ pub async fn authenticate_token(app: &App, user: &str, token: &str, ip: IpAddr, 
     if !allowed {
         return fail().await;
     }
-    app.limiter.forgive(&user, ip);
+    // Single sign-on replaces only the password, and a mail program cannot do the second step:
+    // as with a password, such an account needs an app password there.
+    if !crate::twofactor::factors(&app.db, account.id).await.is_ok_and(|f| !f.enabled()) {
+        return fail().await;
+    }
+    app.limiter.clear(&user, ip);
     Ok(account)
 }
 

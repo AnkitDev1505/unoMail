@@ -114,6 +114,8 @@ export function EventDialog({ editing, calendars, onClose }: { editing: Editing;
     const [before, after, end] = [Date.parse(form.start), Date.parse(start), Date.parse(form.end)];
     if (Number.isNaN(before) || Number.isNaN(after) || Number.isNaN(end)) return set({ start });
     const moved = new Date(end + (after - before));
+    // A plain date is read as midnight UTC, and is written back the same way.
+    if (form.all_day) return set({ start, end: moved.toISOString().slice(0, 10) });
     const local = new Date(moved.getTime() - moved.getTimezoneOffset() * 60_000).toISOString();
     set({ start, end: form.all_day ? local.slice(0, 10) : local.slice(0, 16) });
   }

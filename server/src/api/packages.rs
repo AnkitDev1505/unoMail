@@ -298,7 +298,8 @@ pub async fn asset(State(state): State<AppState>, Path((id, commit, path)): Path
     let mut response = bytes.into_response();
     let headers = response.headers_mut();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(media_type));
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=31536000, immutable"));
+    // The policy follows the administrator's settings: it must not outlive a change to them.
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("private, no-cache"));
     headers.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("default-src 'none'; sandbox"));
     Ok(response)
 }

@@ -81,6 +81,17 @@ unomail restore [snapshot] [--force]  # server must be stopped
 unomail migrate-blobs [--from DIR]    # move to S3, or encrypt existing mail
 ```
 
+`restore` cannot tell whether a server is using the database, so stop it first. With Docker
+that means stopping the container and running the command on its own, as the server's user:
+
+```sh
+docker compose stop unomail
+docker compose run --rm --no-deps -u unomail --entrypoint unomail unomail restore --force
+docker compose start unomail
+```
+
+The current database is kept next to the new one as `unomail.db.before-restore-<time>`.
+
 `UNOMAIL_ENCRYPT_MAIL` encrypts message contents only. The database (subjects, addresses,
 search index) stays readable, so use disk encryption too.
 

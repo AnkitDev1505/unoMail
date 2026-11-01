@@ -278,6 +278,7 @@ pub async fn update(
     }
     if password_hash.is_some() {
         sqlx::query("DELETE FROM app_passwords WHERE account_id = ?").bind(id).execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM masked_integration_tokens WHERE account_id = ?").bind(id).execute(&mut *tx).await?;
         crate::jmap::submission::cancel_pending(&mut *tx, id).await?;
     }
     if unblocking {

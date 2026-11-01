@@ -271,6 +271,7 @@ impl Grant {
             }
             // The provider's word, asked again (or a token login nobody can check: refused).
             None => match &self.token {
+                Some(_) if !crate::twofactor::factors(db, account.id).await.is_ok_and(|f| !f.enabled()) => false,
                 Some(token) => crate::oauth::token_still_valid(app, &account.email, token).await,
                 None => false,
             },
@@ -474,7 +475,15 @@ impl LoginLimiter {
         let mut entries = self.entries.lock();
         // Blocked networks cannot allocate a new account/pair for every request.
         if entries.get(&keys[0].0).is_some_and(|a| a.locked_until > now) { return false; }
-        if entries.len() + keys.iter().filter(|(key, _, _)| !entries.contains_key(key)).count() > MAX_LIMITER_ENTRIES { return false; }
+        // Full: the entries with the oldest windows make room, rather than everybody being refused.
+        if entries.len() + keys.len() > MAX_LIMITER_ENTRIES {
+            let mut idle: Vec<(i64, String)> = entries.iter().filter(|(_, a)| a.locked_until <= now).map(|(key, a)| (a.window_start, key.clone())).collect();
+            idle.sort_unstable();
+            for (_, key) in idle.into_iter().take(MAX_LIMITER_ENTRIES / 10) {
+                entries.remove(&key);
+            }
+            if entries.len() + keys.len() > MAX_LIMITER_ENTRIES { return false; }
+        }
         let mut allowed = true;
         for (index, (key, max, escalate)) in keys.iter().enumerate() {
             let entry = entries.entry(key.clone()).or_default();
@@ -504,8 +513,21 @@ impl LoginLimiter {
         allowed
     }
 
-    /// Takes back the count of an attempt that turned out to be a successful login.
+    /// Takes back the count of one attempt that turned out right. Earlier failures stay counted:
+    /// a correct password is only half a sign-in when a second step follows, and guesses at
+    /// that step must not be wiped by entering the password again.
     pub fn forgive(&self, email: &str, ip: IpAddr) {
+        let keys = self.keys(email, ip);
+        let mut entries = self.entries.lock();
+        for (key, _, _) in &keys {
+            if let Some(entry) = entries.get_mut(key) {
+                entry.failures = entry.failures.saturating_sub(1);
+            }
+        }
+    }
+
+    /// A completed sign-in: the owner is here, so this account's failures from this network end.
+    pub fn clear(&self, email: &str, ip: IpAddr) {
         let [(by_ip, _, _), (pair, _, _), (account, _, _)] = self.keys(email, ip);
         let mut entries = self.entries.lock();
         entries.remove(&pair);
@@ -626,7 +648,7 @@ pub async fn authenticate_with(
     ip: IpAddr,
     protocol: Protocol,
 ) -> Result<(Account, Credential), AuthError> {
-    let email = email.trim().to_lowercase();
+    let email = crate::util::login_address(email);
     if email.len() > 320 || password.len() > MAX_PASSWORD_LEN {
         return Err(AuthError::Invalid);
     }
@@ -664,7 +686,7 @@ pub async fn authenticate_with(
         if let Some((id, scopes)) = found.filter(|(_, scopes)| scopes.split(',').any(|s| s == scope)) {
             let _ = scopes;
             sqlx::query("UPDATE app_passwords SET last_used_at = ?, last_ip = ? WHERE id = ?").bind(crate::util::now()).bind(ip.to_string()).bind(id).execute(db).await.map_err(internal)?;
-            limiter.forgive(&email, ip);
+            limiter.clear(&email, ip);
             return Ok((account.clone(), Credential::AppPassword(id)));
         }
     }
@@ -682,7 +704,12 @@ pub async fn authenticate_with(
 
     match account {
         Some(account) if password_ok && allowed && !needs_app_password => {
-            limiter.forgive(&email, ip);
+            // With a second step still to come, the sign-in is not complete yet.
+            if protocol == Protocol::Web && crate::twofactor::factors(db, account.id).await.map_err(internal)?.enabled() {
+                limiter.forgive(&email, ip);
+            } else {
+                limiter.clear(&email, ip);
+            }
             Ok((account, Credential::Password))
         }
         _ => {
@@ -786,6 +813,25 @@ mod tests {
         assert!(limiter.attempt("a@example.com", owner));
         limiter.forgive("a@example.com", owner);
         assert!(!limiter.attempt("a@example.com", ip), "a success elsewhere does not unlock the guesser");
+    }
+
+    #[test]
+    fn entering_the_password_again_does_not_wipe_guesses_at_the_second_step() {
+        let limiter = LoginLimiter::default();
+        let ip: IpAddr = "203.0.113.77".parse().unwrap();
+        // Password right (taken back), then wrong codes, over and over.
+        let mut refused = false;
+        for _ in 0..MAX_FAILURES_PER_ACCOUNT_AND_IP {
+            if !limiter.attempt("a@example.com", ip) {
+                refused = true;
+                break;
+            }
+            limiter.forgive("a@example.com", ip);
+            refused |= !limiter.attempt("a@example.com", ip);
+        }
+        assert!(refused || limiter.is_blocked("a@example.com", ip), "the guesses add up");
+        limiter.clear("a@example.com", ip);
+        assert!(!limiter.is_blocked("a@example.com", ip), "a completed sign-in ends them");
     }
 
     #[test]

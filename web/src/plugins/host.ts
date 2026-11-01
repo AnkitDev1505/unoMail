@@ -511,7 +511,9 @@ export async function handleCall(plugin: Running, data: unknown): Promise<{ repl
 }
 
 export function createRunning(info: PackageInfo, view: string | null = null): Running {
-  return { info, permissions: new Set(info.permissions), view, port: null, calls: [], lastPong: Date.now(), ping: 0 };
+  // Started only for an administrator's admin pages, without the opt-in that mail access needs.
+  const permissions = info.adminOnly ? info.permissions.filter((p) => !/^(message|attachments|composer):/.test(p)) : info.permissions;
+  return { info, permissions: new Set(permissions), view, port: null, calls: [], lastPong: Date.now(), ping: 0 };
 }
 
 /** Called when a plug-in frame has loaded: hands it its end of a private channel. */
@@ -565,10 +567,17 @@ export function stopPlugin(id: string, reason?: string) {
   if (reason) notifier(reason);
 }
 
+let lastHeartbeat = 0;
+
 function checkHeartbeats() {
   const now = Date.now();
+  // Timers stop while the computer sleeps, and slow down in a hidden tab: a long gap says
+  // nothing about the plug-ins, which get a fresh chance to answer.
+  const asleep = now - lastHeartbeat > HEARTBEAT_MS * 2;
+  lastHeartbeat = now;
   for (const plugin of running.values()) {
     if (!plugin.port) continue;
+    if (asleep) plugin.lastPong = now;
     if (now - plugin.lastPong > UNRESPONSIVE_MS) {
       stopPlugin(plugin.info.id, t('{{name}} stopped responding and was turned off', { name: plugin.info.name }));
       continue;

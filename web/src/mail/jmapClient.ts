@@ -60,6 +60,7 @@ export interface EmailFull extends EmailSummary {
   cc: EmailAddress[] | null;
   bcc: EmailAddress[] | null;
   replyTo: EmailAddress[] | null;
+  inReplyTo?: string[] | null;
   messageId: string[] | null;
   references: string[] | null;
   /** Ways of unsubscribing the sender offers (List-Unsubscribe), or null. */
@@ -113,6 +114,13 @@ export interface Draft {
   receiptTo?: string;
   /** Sign and/or encrypt with the user's S/MIME certificate (done by the server). */
   smime?: { sign: boolean; encrypt: boolean };
+  /** End-to-end encrypted (OpenPGP): such a message is never stored on the server in the clear. */
+  encrypted?: boolean;
+}
+
+/** A part shown as a file. A Content-ID alone does not make a part an embedded picture. */
+export function isFile(part: { cid?: string | null; type?: string }): boolean {
+  return !part.cid || !(part.type ?? '').startsWith('image/');
 }
 
 /** When a message leaves: after a delay that allows calling it back, or at a chosen time. */
@@ -318,18 +326,42 @@ export async function destroyMailbox(mailboxId: string) {
 
 /** Splits a comma/semicolon separated recipient field into JMAP addresses. */
 export function parseRecipients(field: string): EmailAddress[] {
-  return field
-    .split(/[,;]/)
+  // A separator inside a quoted name or between angle brackets does not end the address.
+  const entries: string[] = [];
+  let current = '';
+  let quoted = false;
+  let angle = false;
+  for (let i = 0; i < field.length; i += 1) {
+    const c = field[i];
+    if (quoted && c === '\\' && i + 1 < field.length) {
+      current += c + field[(i += 1)];
+      continue;
+    }
+    if (c === '"') quoted = !quoted;
+    else if (!quoted && c === '<') angle = true;
+    else if (!quoted && c === '>') angle = false;
+    if ((c === ',' || c === ';') && !quoted && !angle) {
+      entries.push(current);
+      current = '';
+    } else current += c;
+  }
+  entries.push(current);
+  return entries
     .map((entry) => entry.trim())
     .filter(Boolean)
     .map((entry) => {
       const match = entry.match(/^(.*)<([^<>]+)>$/);
-      return match ? { name: match[1].trim().replace(/^"|"$/g, '') || null, email: match[2].trim() } : { name: null, email: entry };
+      if (!match) return { name: null, email: entry };
+      const name = match[1].trim();
+      const unquoted = name.startsWith('"') && name.endsWith('"') && name.length > 1 ? name.slice(1, -1).replace(/\\(.)/g, '$1') : name;
+      return { name: unquoted || null, email: match[2].trim() };
     });
 }
 
 export function formatAddress(address: EmailAddress): string {
-  return address.name ? `${address.name} <${address.email}>` : address.email;
+  if (!address.name) return address.email;
+  const name = /[",;<>\\]/.test(address.name) ? `"${address.name.replace(/["\\]/g, '\\$&')}"` : address.name;
+  return `${name} <${address.email}>`;
 }
 
 export function htmlToText(html: string): string {
@@ -387,10 +419,11 @@ function emailObject(draft: Draft, mailboxId: string, isDraft: boolean) {
 export async function saveDraft(draft: Draft, draftsId: string, previousId?: string): Promise<string> {
   draft = await withUploads(draft);
   const id = await accountId();
-  const [[, result]] = await jmap([
-    ['Email/set', { accountId: id, create: { draft: emailObject(draft, draftsId, true) }, destroy: previousId ? [previousId] : [] }, 'c'],
-  ]);
+  const [[, result]] = await jmap([['Email/set', { accountId: id, create: { draft: emailObject(draft, draftsId, true) } }, 'c']]);
   if (result.notCreated?.draft) throw new Error(result.notCreated.draft.description ?? t('Could not save the draft'));
+  // The earlier copy goes only once this one is safely stored. The server would delete it
+  // even if the new one were refused, were both asked for in one request.
+  if (previousId) await destroyEmails([previousId]).catch(() => {});
   return result.created.draft.id;
 }
 

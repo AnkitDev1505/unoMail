@@ -52,7 +52,15 @@ pub fn parse_reply(reply: &str) -> Result<Verdict, Unavailable> {
     }
 }
 
+/// What the bundled clamd takes in one stream (`StreamMaxLength`). A larger message would be
+/// answered with an error, and so deferred at every retry until it expires.
+const MAX_STREAM: usize = 100 * 1024 * 1024;
+
 async fn instream(addr: &str, raw: &[u8]) -> Result<Verdict, Unavailable> {
+    if raw.len() >= MAX_STREAM {
+        tracing::warn!(size = raw.len(), "message too large for the virus scanner; not scanned");
+        return Ok(Verdict::Clean);
+    }
     let io = |e: std::io::Error| Unavailable(e.to_string());
     let mut stream = connect(addr).await.map_err(io)?;
     stream.write_all(b"zINSTREAM\0").await.map_err(io)?;

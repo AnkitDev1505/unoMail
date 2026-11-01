@@ -81,13 +81,20 @@ impl AcmeConfig {
 
 pub async fn load_config(app: &App) -> anyhow::Result<Option<AcmeConfig>> {
     Ok(match db::get_setting(&app.db, SETTING_CONFIG).await? {
-        Some(json) => Some(serde_json::from_str(&json)?),
+        Some(json) => {
+            let mut config: AcmeConfig = serde_json::from_str(&json)?;
+            // Tokens saved by earlier versions are in the clear, and sealed at the next save.
+            config.cloudflare_token = config.cloudflare_token.map(|token| app.secrets.open(&token).unwrap_or(token));
+            Some(config)
+        }
         None => None,
     })
 }
 
 pub async fn save_config(app: &App, config: &AcmeConfig) -> anyhow::Result<()> {
-    db::set_setting(&app.db, SETTING_CONFIG, &serde_json::to_string(config)?).await?;
+    let mut stored = config.clone();
+    stored.cloudflare_token = stored.cloudflare_token.map(|token| app.secrets.seal(&token));
+    db::set_setting(&app.db, SETTING_CONFIG, &serde_json::to_string(&stored)?).await?;
     Ok(())
 }
 

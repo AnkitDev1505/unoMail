@@ -73,10 +73,7 @@ pub async fn create(State(state): State<AppState>, session: Session, Json(req): 
     Ok(Json(domain))
 }
 
-fn default_selector() -> String {
-    let now = time::OffsetDateTime::now_utc();
-    format!("uno{}{:02}", now.year(), u8::from(now.month()))
-}
+use dkim::default_selector;
 
 pub async fn get(State(state): State<AppState>, session: Session, Path(id): Path<i64>) -> JsonResult<DomainView> {
     session.require_domain(&state.db, id).await?;

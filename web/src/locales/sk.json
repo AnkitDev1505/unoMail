@@ -2422,5 +2422,9 @@
   "A setup QR code is not available for this account: it cannot use both IMAP and SMTP, or its address is not plain ASCII.": "Pre tento účet nie je konfiguračný QR kód dostupný: nemôže používať IMAP aj SMTP zároveň alebo jeho adresa nie je čisté ASCII.",
   "Set up Thunderbird for Android by scanning a code instead of typing the server details. With 2-step verification on, create an app password with mail access above and show its QR code.": "Nastavte Thunderbird pre Android naskenovaním kódu namiesto písania údajov o serveri. So zapnutým dvojstupňovým overením vytvorte vyššie heslo aplikácie s prístupom k pošte a zobrazte jeho QR kód.",
   "Set up Thunderbird for Android by scanning a code instead of typing the server details. The code carries your password; an app password with mail access works too.": "Nastavte Thunderbird pre Android naskenovaním kódu namiesto písania údajov o serveri. Kód obsahuje vaše heslo; funguje aj heslo aplikácie s prístupom k pošte.",
-  "Show": "Zobraziť"
+  "Show": "Zobraziť",
+  "Finish or close the message you are writing first": "Najprv dokončite alebo zatvorte rozpísanú správu",
+  "An encrypted message cannot be saved as a draft. Send it, or turn encryption off to keep it.": "Šifrovanú správu nemožno uložiť ako koncept. Odošlite ju alebo ju zachovajte vypnutím šifrovania.",
+  "The server could not be reached. Please try again.": "Server sa nepodarilo kontaktovať. Skúste to znova.",
+  "The test event failed: {{status}}": "Testovacia udalosť zlyhala: {{status}}"
 }

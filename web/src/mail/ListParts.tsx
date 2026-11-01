@@ -6,7 +6,7 @@ import WarningAmber from '@mui/icons-material/WarningAmber';
 import { Avatar, Chip, Stack, Tooltip } from '@mui/material';
 import { type MouseEvent, useEffect, useSyncExternalStore } from 'react';
 import { downloadUrl, formatBytes, get } from '../lib/api';
-import type { BodyPart, EmailSummary } from './jmapClient';
+import { type BodyPart, type EmailSummary, isFile } from './jmapClient';
 import { previewKind, type PreviewFile } from './Preview';
 import { attachmentRisk } from './risk';
 import { guardedDownload, useRiskConfirm } from './RiskConfirm';
@@ -87,7 +87,7 @@ function iconFor(type: string) {
 
 /** The files attached to a message, as chips below it in the list (embedded pictures are left out). */
 export function listedAttachments(email: EmailSummary): BodyPart[] {
-  return (email.attachments ?? []).filter((part) => !part.cid);
+  return (email.attachments ?? []).filter(isFile);
 }
 
 const SHOWN = 3;

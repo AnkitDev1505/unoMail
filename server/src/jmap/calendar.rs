@@ -225,7 +225,8 @@ pub fn rule_to_json(rule: &str, zone: Option<Tz>) -> Option<Value> {
                 let mut days = Vec::new();
                 for day in value.split(',') {
                     let day = day.trim().to_ascii_lowercase();
-                    let (nth, name) = day.split_at(day.len().checked_sub(2)?);
+                    // Stored rules are not validated, and may hold anything.
+                    let (nth, name) = day.split_at_checked(day.len().checked_sub(2)?)?;
                     let mut entry = json!({ "@type": "NDay", "day": name });
                     if !nth.is_empty() {
                         entry["nthOfPeriod"] = json!(nth.trim_start_matches('+').parse::<i32>().ok()?);
@@ -420,11 +421,14 @@ fn event_input(event: &Value, floating: Tz) -> Result<EventInput, Value> {
         Some(Value::String(name)) => Some(name.parse().map_err(|_| invalid("timeZone", "unknown time zone".into()))?),
         Some(_) => return Err(invalid("timeZone", "timeZone must be a string".into())),
     };
+    let out_of_range = || invalid("duration", "invalid duration".into());
     let (start_text, end_text) = if all_day {
         let days = ((duration + 86_399) / 86_400).max(1);
-        (start.format("%Y-%m-%d").to_string(), (start.date() + chrono::Duration::days(days - 1)).format("%Y-%m-%d").to_string())
+        let last = start.date().checked_add_signed(chrono::TimeDelta::try_days(days - 1).ok_or_else(out_of_range)?).ok_or_else(out_of_range)?;
+        (start.format("%Y-%m-%d").to_string(), last.format("%Y-%m-%d").to_string())
     } else {
-        (start.format(LOCAL).to_string(), (start + chrono::Duration::seconds(duration)).format(LOCAL).to_string())
+        let end = start.checked_add_signed(chrono::TimeDelta::try_seconds(duration).ok_or_else(out_of_range)?).ok_or_else(out_of_range)?;
+        (start.format(LOCAL).to_string(), end.format(LOCAL).to_string())
     };
     let rrule = match event.get("recurrenceRules") {
         None | Some(Value::Null) => String::new(),
@@ -724,6 +728,10 @@ pub async fn event_set(ctx: &mut Context<'_>, args: &Map<String, Value>) -> Meth
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_stored_rule_with_a_multibyte_day_is_not_a_panic() {
+        assert_eq!(super::rule_to_json("FREQ=WEEKLY;BYDAY=aéb", None), None);
+    }
     use super::*;
 
     #[test]

@@ -711,9 +711,23 @@ impl Session {
         }
         if let Some(tx) = &mut self.tx {
             if notify.is_some() || orcpt.is_some() {
+                // What was asked goes for wherever an alias sends it, too.
+                for target in &targets {
+                    let forwarded = match target {
+                        Target::Remote(remote) => Some(remote.to_string()),
+                        Target::Local { address, .. } => Some(address.clone()),
+                        _ => None,
+                    };
+                    if let Some(forwarded) = forwarded {
+                        tx.dsn.recipients.insert(forwarded.to_ascii_lowercase(), (notify.clone(), orcpt.clone()));
+                    }
+                }
                 tx.dsn.recipients.insert(address.to_string().to_ascii_lowercase(), (notify, orcpt));
             }
-            tx.recipients.push((address, targets));
+            // Named twice, delivered once.
+            if !tx.recipients.iter().any(|(known, _)| *known == address) {
+                tx.recipients.push((address, targets));
+            }
         }
         self.reply("250 2.1.5 Ok").await?;
         Ok(Flow::Continue)
@@ -725,12 +739,14 @@ impl Session {
     /// rejected outright: treating them as line breaks (or passing them on) is what makes SMTP
     /// smuggling possible. Input is always consumed to the terminator to stay in sync.
     async fn read_data(&mut self) -> Result<Result<Vec<u8>, DataError>, ReadError> {
-        let deadline = tokio::time::Instant::now() + COMMAND_TIMEOUT;
+        // A slow link is fine as long as data keeps coming; the overall limit only stops a
+        // connection from being held open for ever.
+        let deadline = tokio::time::Instant::now() + MAX_DATA_DURATION;
         let max = self.app.rt().max_message_size;
         let mut data = Vec::new();
         let mut error = None;
         loop {
-            let line = tokio::time::timeout_at(deadline, self.conn.read_line_raw(MAX_DATA_LINE)).await.map_err(|_| ReadError::Timeout)??;
+            let line = tokio::time::timeout(COMMAND_TIMEOUT.min(deadline.saturating_duration_since(tokio::time::Instant::now())), self.conn.read_line_raw(MAX_DATA_LINE)).await.map_err(|_| ReadError::Timeout)??;
             if line == b".\r\n" {
                 break;
             }
@@ -964,10 +980,15 @@ async fn handle(app: AppState, mode: Mode, mut tcp: TcpStream, peer: SocketAddr)
     }
 }
 
+/// The longest one message may take to arrive, however steadily it comes.
+const MAX_DATA_DURATION: Duration = Duration::from_secs(3600);
+
 pub async fn serve(app: AppState, mode: Mode, listener: TcpListener) {
     loop {
         match listener.accept().await {
-            Ok((tcp, peer)) => {
+            Ok((tcp, mut peer)) => {
+                // On a dual-stack socket IPv4 clients appear as ::ffff:a.b.c.d.
+                peer.set_ip(peer.ip().to_canonical());
                 tokio::spawn(handle(app.clone(), mode, tcp, peer));
             }
             Err(err) => {

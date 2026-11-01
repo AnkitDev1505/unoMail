@@ -64,11 +64,15 @@ fn blocked_in_zip(data: &[u8], depth: usize, budget: &mut u64) -> Option<String>
         return Some(name.into_owned());
     }
     for index in 0..archive.len() {
+        // An archive is known by its first bytes: the name inside may say anything.
         let Ok(mut entry) = archive.by_index(index) else { continue };
         let Ok(name) = entry.name().map(|name| name.into_owned()) else { continue };
-        if !name.to_ascii_lowercase().ends_with(".zip") {
+        let mut magic = [0u8; 4];
+        if entry.read_exact(&mut magic).is_err() || magic != *b"PK\x03\x04" {
             continue;
         }
+        drop(entry);
+        let Ok(mut entry) = archive.by_index(index) else { continue };
         if depth >= MAX_DEPTH {
             return Some(format!("{name}, archives nested too deeply"));
         }
@@ -106,7 +110,8 @@ fn find_blocked(message: &Message<'_>, depth: usize, budget: &mut u64) -> Option
                     return Some(found);
                 }
             }
-            PartType::Binary(_) | PartType::InlineBinary(_) => {
+            // Whatever the part is labelled, a mail program saves what its name and content say.
+            PartType::Binary(_) | PartType::InlineBinary(_) | PartType::Text(_) | PartType::Html(_) => {
                 let content_type = part.content_type().map(|ct| (ct.ctype(), ct.subtype()));
                 let data = part.contents();
                 if is_zip(name, content_type, data)

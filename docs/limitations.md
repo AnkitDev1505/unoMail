@@ -41,7 +41,18 @@
 
 - The built-in filter has no public suffix list.
 - The personal filter starts after 10 spam and 10 wanted messages.
-- Fuzzy training applies after about 15 seconds.
+- Rspamd's fuzzy hashes are not trained locally.
+
+## Sieve
+
+- Variables are shared across included scripts: `global` is accepted, and every variable is global.
+
+## JMAP
+
+- `Email/query` sorts by `receivedAt` only, and does not support `anchor`.
+- Push announces mail state only (Email, Mailbox, Thread), not calendars, contacts or scripts.
+- `EmailSubmission` takes its recipients from the message, not from `envelope.rcptTo`.
+- For mailboxes shared with you, a message moved out of them shows at the next full fetch.
 
 ## Web client
 

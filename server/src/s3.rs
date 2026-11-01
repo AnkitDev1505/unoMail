@@ -131,6 +131,9 @@ impl S3 {
     fn location(&self, key: &str) -> (String, String, String) {
         let (scheme, rest) = self.cfg.endpoint.split_once("://").unwrap_or(("https", &self.cfg.endpoint));
         let (endpoint_host, base_path) = rest.split_once('/').map_or((rest, ""), |(h, p)| (h, p));
+        // The client leaves a default port out of the Host header, so the signature must too.
+        let default_port = if scheme == "https" { ":443" } else { ":80" };
+        let endpoint_host = endpoint_host.strip_suffix(default_port).unwrap_or(endpoint_host);
         let base_path = if base_path.is_empty() { String::new() } else { format!("/{}", base_path.trim_matches('/')) };
         let object = uri_encode(key, true);
         if self.cfg.path_style {

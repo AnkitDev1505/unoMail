@@ -58,6 +58,15 @@ export function folderActions(place: Place): FolderAction[] {
   return actions;
 }
 
+/**
+ * The messages of a conversation a folder action applies to: those in the folder of the message
+ * acted on. A conversation also spans Sent, Trash and others, which the action must leave alone.
+ */
+export function inFolderOf<T extends { mailboxIds: Record<string, boolean> }>(messages: T[], target: { mailboxIds: Record<string, boolean> }): T[] {
+  const folders = Object.keys(target.mailboxIds);
+  return messages.filter((message) => folders.some((folder) => message.mailboxIds[folder]));
+}
+
 /** Where messages are sent: a folder, or nowhere (deleted for good). */
 export type Destination = { mailboxId: string } | 'destroy';
 

@@ -39,6 +39,12 @@ const SESSION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const MAX_LINE: usize = 16 * 1024;
 /// Literals other than APPEND payloads (user names, search strings, ...) are small.
 const MAX_SMALL_LITERAL: usize = 16 * 1024;
+/// The most one command may hold in memory, literals included, before sign-in and after.
+const MAX_ANONYMOUS_COMMAND: usize = 64 * 1024;
+const MAX_SMALL_COMMAND: usize = 1024 * 1024;
+/// How many full-size messages one MULTIAPPEND may carry.
+const MAX_APPEND_MESSAGES: usize = 4;
+const MAX_COMMAND_LITERALS: usize = 1024;
 const MAX_ERRORS: u32 = 20;
 const MAX_LOGIN_FAILURES: u32 = 3;
 
@@ -357,12 +363,20 @@ fn parse_search(args: &mut std::slice::Iter<'_, Arg>, depth: usize) -> Result<Ke
         "SENTBEFORE" => Key::Sent(i64::MIN, date(args)?),
         "SENTON" => date(args).map(|d| Key::Sent(d, d + DAY))?,
         "SENTSINCE" => Key::Sent(date(args)?, i64::MAX),
-        "MODSEQ" => Key::Modseq(number(args)?),
+        "MODSEQ" => {
+            // RFC 7162: an entry name and a type may come first; the value is what counts.
+            if args.clone().next().and_then(Arg::text).is_some_and(|first| first.parse::<i64>().is_err()) {
+                args.next();
+                args.next();
+            }
+            Key::Modseq(number(args)?)
+        }
         // WITHIN (RFC 5032): relative to now, in seconds.
         "YOUNGER" => Key::Internal(crate::util::now() - number(args)?, i64::MAX),
         "OLDER" => Key::Internal(i64::MIN, crate::util::now() - number(args)? + 1),
         // RFC 9738.
-        "UIDAFTER" => Key::Uid(SequenceSet(vec![((number(args)? as u32).saturating_add(1), u32::MAX)])),
+        // The upper end is the highest possible UID, not `*`: that would turn the range around.
+        "UIDAFTER" => Key::Uid(SequenceSet(vec![((number(args)? as u32).saturating_add(1).min(u32::MAX - 1), u32::MAX - 1)])),
         "UIDBEFORE" => match number(args)? as u32 {
             0 | 1 => Key::Not(Box::new(Key::All)),
             n => Key::Uid(SequenceSet(vec![(1, n - 1)])),
@@ -547,6 +561,9 @@ impl Session {
         let mut tokenizer = Tokenizer::default();
         let mut first = true;
         let mut limit = MAX_SMALL_LITERAL;
+        // Each literal is limited, and so is the whole command: it is all held in memory.
+        let mut budget = if self.account.is_some() { MAX_SMALL_COMMAND } else { MAX_ANONYMOUS_COMMAND };
+        let mut literals = 0;
         loop {
             let line = self.conn.read_line(MAX_LINE).await?;
             if first {
@@ -559,19 +576,31 @@ impl Session {
                 };
                 if command.eq_ignore_ascii_case(b"APPEND") || command.eq_ignore_ascii_case(b"REPLACE") {
                     limit = self.app.rt().max_message_size;
+                    if self.account.is_some() {
+                        // MULTIAPPEND carries several messages at once.
+                        budget = limit.saturating_mul(MAX_APPEND_MESSAGES).max(MAX_SMALL_COMMAND);
+                    }
                 } else if command.eq_ignore_ascii_case(b"SETMETADATA") {
-                    limit = metadata::MAX_VALUE;
+                    // Room to be told politely that a value is too long.
+                    limit = MAX_SMALL_COMMAND / 2;
                 }
                 first = false;
             }
+            budget = budget.saturating_sub(line.len() + 2);
             match tokenizer.feed(&line) {
                 Ok(None) => return Ok(tokenizer.finish().ok()),
                 Ok(Some(literal)) => {
+                    literals += 1;
                     if literal.len > limit || (self.account.is_none() && literal.len > 1024) {
                         // The announced data would otherwise be parsed as commands.
                         self.line("* BYE literal too large").await?;
                         return Err(ReadError::Closed);
                     }
+                    if literal.len >= budget || literals > MAX_COMMAND_LITERALS {
+                        self.line("* BYE command too large").await?;
+                        return Err(ReadError::Closed);
+                    }
+                    budget -= literal.len;
                     if literal.sync {
                         self.line("+ Ready for literal data").await?;
                     }
@@ -670,9 +699,18 @@ impl Session {
                 self.sync().await?;
             }
             match result {
-                Ok(text) => self.line(&format!("{tag} OK {text}")).await?,
+                Ok(text) => {
+                    // A signed-in client that works is not a client making trouble.
+                    if self.account.is_some() {
+                        self.errors = 0;
+                    }
+                    self.line(&format!("{tag} OK {text}")).await?;
+                }
                 Err(text) => {
-                    self.errors += 1;
+                    // An ordinary NO (a missing mailbox, a full quota) is an answer, not abuse.
+                    if self.account.is_none() || text.starts_with("BAD") {
+                        self.errors += 1;
+                    }
                     self.line(&format!("{tag} {text}")).await?;
                 }
             }
@@ -739,6 +777,7 @@ impl Session {
                 self.account = None;
                 self.grant = None;
                 self.selected = None;
+                self.notify = None;
                 (self.condstore, self.qresync, self.rev2, self.utf8, self.uid_only) = (false, false, false, false, false);
                 self.saved.clear();
                 Ok("UNAUTHENTICATE completed".into())
@@ -909,6 +948,15 @@ impl Session {
     }
 
     /// A mailbox name as the client expects it.
+    /// A mailbox's name as this client knows it: another user's lives under `Shared/`.
+    async fn client_name(&self, mailbox: &Mailbox) -> String {
+        if mailbox.account_id == self.account_id() {
+            return self.encode_name(&mailbox.name);
+        }
+        let owner: Option<String> = sqlx::query_scalar("SELECT email FROM accounts WHERE id = ?").bind(mailbox.account_id).fetch_optional(&self.app.db).await.ok().flatten();
+        self.encode_name(&format!("{}{}/{}", crate::sharing::SHARED_PREFIX, owner.unwrap_or_default(), mailbox.name))
+    }
+
     fn encode_name(&self, name: &str) -> String {
         if self.rev2 || self.utf8 { name.to_owned() } else { utf7_encode(name) }
     }
@@ -1063,7 +1111,7 @@ impl Session {
         if self.rev2 {
             // IMAP4rev2 names the mailbox in its canonical form instead of reporting UNSEEN.
             let mut list = format!("* LIST ({}) \"/\" ", special_use(mailbox.role.as_deref()).trim_start()).into_bytes();
-            string(&mut list, self.encode_name(&mailbox.name).as_bytes());
+            string(&mut list, self.client_name(&mailbox).await.as_bytes());
             out.push_str(&String::from_utf8_lossy(&list));
             out.push_str("\r\n");
         } else if let Some(first) = messages.iter().position(|m| !m.seen) {
@@ -1160,6 +1208,7 @@ impl Session {
         let mut subscribed_only = lsub;
         // Under LIST-EXTENDED the subscription state is reported as \Subscribed.
         let mut show_subscribed = false;
+        let mut special_only = false;
         if let Some(Arg::List(selection)) = args.first() {
             for option in selection.iter().filter_map(Arg::atom_upper) {
                 match option.as_str() {
@@ -1167,7 +1216,8 @@ impl Session {
                         subscribed_only = true;
                         show_subscribed = true;
                     }
-                    "RECURSIVEMATCH" | "SPECIAL-USE" | "REMOTE" => {}
+                    "SPECIAL-USE" => special_only = true,
+                    "RECURSIVEMATCH" | "REMOTE" => {}
                     _ => return Ok(bad("unknown LIST selection option")),
                 }
             }
@@ -1191,22 +1241,27 @@ impl Session {
                 }
             }
         }
-        let (Some(reference), Some(pattern)) = (args.first().and_then(Arg::text), args.get(1).and_then(Arg::text)) else {
+        // RFC 5258: one pattern, or a list of them.
+        let patterns: Vec<String> = match args.get(1) {
+            Some(Arg::List(list)) => list.iter().filter_map(Arg::text).collect(),
+            other => other.and_then(Arg::text).into_iter().collect(),
+        };
+        let (Some(reference), false) = (args.first().and_then(Arg::text), patterns.is_empty()) else {
             return Ok(bad("usage: LIST reference pattern"));
         };
         let name = if lsub { "LSUB" } else { "LIST" };
-        if pattern.is_empty() {
+        if patterns.len() == 1 && patterns[0].is_empty() {
             self.line(&format!("* {name} (\\Noselect) \"/\" \"\"")).await?;
             return Ok(Ok(format!("{name} completed")));
         }
-        let pattern = self.decode_name(&format!("{reference}{pattern}"));
+        let patterns: Vec<String> = patterns.iter().map(|pattern| self.decode_name(&format!("{reference}{pattern}"))).collect();
         let mailboxes = match self.app.store.list_mailboxes(self.account_id()).await {
             Ok(mailboxes) => mailboxes,
             Err(err) => return Ok(Err(internal(err))),
         };
         let mut out = Vec::new();
-        for mailbox in mailboxes.iter().filter(|m| !subscribed_only || m.subscribed) {
-            let matched = list_match(&pattern, &mailbox.name) || (mailbox.name == "INBOX" && pattern.eq_ignore_ascii_case("inbox"));
+        for mailbox in mailboxes.iter().filter(|m| (!subscribed_only || m.subscribed) && (!special_only || !special_use(m.role.as_deref()).trim().is_empty())) {
+            let matched = patterns.iter().any(|pattern| list_match(pattern, &mailbox.name) || (mailbox.name == "INBOX" && pattern.eq_ignore_ascii_case("inbox")));
             if !matched {
                 continue;
             }
@@ -1232,7 +1287,7 @@ impl Session {
             };
             for entry in shared {
                 let display = entry.display_name();
-                if list_match(&pattern, &display) {
+                if patterns.iter().any(|pattern| list_match(pattern, &display)) {
                     out.extend_from_slice(format!("* {name} (\\HasNoChildren) \"/\" ").as_bytes());
                     string(&mut out, self.encode_name(&display).as_bytes());
                     out.extend_from_slice(b"\r\n");
@@ -1290,7 +1345,7 @@ impl Session {
             parts.push(format!("{} {value}", item.atom_upper().unwrap_or_default()));
         }
         let mut out = b"* STATUS ".to_vec();
-        string(&mut out, self.encode_name(&mailbox.name).as_bytes());
+        string(&mut out, self.client_name(mailbox).await.as_bytes());
         out.extend_from_slice(format!(" ({})\r\n", parts.join(" ")).as_bytes());
         Ok(out)
     }
@@ -1407,6 +1462,8 @@ impl Session {
                 {
                     date = Some(parsed.unix_timestamp());
                 }
+                // A short string with a message after it, that is neither a date nor a message.
+                Arg::Str(text) if date.is_none() && text.len() < 64 && matches!(rest.get(i + 1), Some(Arg::Str(_))) && !text.contains(&b':') && !text.contains(&b'\n') => return bad("invalid date-time"),
                 Arg::Str(raw) => {
                     messages.push((flags, std::mem::take(&mut keywords), date.take(), raw));
                     flags = Flags::default();
@@ -1569,6 +1626,12 @@ impl Session {
             .map(|m| m.id)
             .collect();
         for id in targets {
+            // Another client may have undeleted it since this session last looked.
+            match self.app.store.message(owner, id).await {
+                Ok(message) if message.deleted => {}
+                Ok(_) | Err(StoreError::NotFound) => continue,
+                Err(err) => return Err(internal(err)),
+            }
             match self.app.store.delete_message(owner, id).await {
                 Ok(()) | Err(StoreError::NotFound) => {}
                 Err(err) => return Err(internal(err)),
@@ -1790,8 +1853,13 @@ impl Session {
             // Fetching a body without PEEK sets \Seen; the new flags are part of this response.
             let mut flags_changed = false;
             if mark_seen && !read_only && !message.seen && self.may('s') {
-                let flags = Flags { seen: true, answered: message.answered, flagged: message.flagged, deleted: message.deleted, draft: message.draft };
-                let keywords: Vec<String> = serde_json::from_str(&message.keywords).unwrap_or_default();
+                // From the stored state: this session's copy may be behind another client's change.
+                let stored = match self.app.store.message(self.owner(), message.id).await {
+                    Ok(stored) => stored,
+                    Err(_) => message.clone(),
+                };
+                let flags = Flags { seen: true, answered: stored.answered, flagged: stored.flagged, deleted: stored.deleted, draft: stored.draft };
+                let keywords: Vec<String> = serde_json::from_str(&stored.keywords).unwrap_or_default();
                 if self.app.store.set_flags_and_keywords(self.owner(), message.id, flags, &keywords).await.is_ok()
                     && let Ok(updated) = self.app.store.message(self.owner(), message.id).await
                 {
@@ -1865,15 +1933,18 @@ impl Session {
         }
         let mut out = String::new();
         for index in self.resolve(&set, uid) {
-            let Some(message) = self.selected.as_ref().and_then(|s| s.messages.get(index).cloned()) else { continue };
-            // Conditional store: skip messages changed since the client last looked. The check
-            // uses the stored state, not this session's possibly stale view.
-            if let Some(limit) = unchanged_since {
-                let latest = self.app.store.message(self.owner(), message.id).await.map(|m| m.modseq).unwrap_or(i64::MAX);
-                if latest > limit {
-                    modified.push(if uid { message.uid } else { index as i64 + 1 });
-                    continue;
-                }
+            let Some(seen) = self.selected.as_ref().and_then(|s| s.messages.get(index).cloned()) else { continue };
+            // Changes start from the stored state, not this session's possibly stale view: what
+            // another client did meanwhile must survive.
+            let message = match self.app.store.message(self.owner(), seen.id).await {
+                Ok(message) => message,
+                Err(StoreError::NotFound) => continue,
+                Err(err) => return Ok(Err(internal(err))),
+            };
+            // Conditional store: skip messages changed since the client last looked.
+            if let Some(limit) = unchanged_since && message.modseq > limit {
+                modified.push(if uid { message.uid } else { index as i64 + 1 });
+                continue;
             }
             let mut current: Vec<String> = serde_json::from_str(&message.keywords).unwrap_or_default();
             let (new_flags, new_keywords) = match operation.as_str() {
@@ -1964,7 +2035,7 @@ impl Session {
         if self.uid_only && keys.iter().any(Key::uses_sequence_numbers) {
             return Err("BAD [UIDREQUIRED] search by UID instead of sequence numbers".into());
         }
-        let uses_modseq = args.iter().any(|a| a.atom_upper().as_deref() == Some("MODSEQ"));
+        let uses_modseq = mentions_modseq(args);
         if uses_modseq {
             self.condstore = true;
         }
@@ -2047,7 +2118,17 @@ impl Session {
             && options.iter().any(|o| o == "SAVE")
         {
             let selected = self.selected.as_ref();
-            self.saved = hits.iter().filter_map(|&i| selected.and_then(|s| s.messages.get(i)).map(|m| m.uid as u32)).collect();
+            // RFC 5182: with only MIN and/or MAX asked for, only those are saved.
+            let everything = options.iter().any(|o| o == "ALL" || o == "COUNT");
+            let (min, max) = (options.iter().any(|o| o == "MIN"), options.iter().any(|o| o == "MAX"));
+            let chosen: Vec<usize> = if everything || !(min || max) {
+                hits.clone()
+            } else {
+                let mut chosen: Vec<usize> = [min.then(|| hits.first().copied()).flatten(), max.then(|| hits.last().copied()).flatten()].into_iter().flatten().collect();
+                chosen.dedup();
+                chosen
+            };
+            self.saved = chosen.iter().filter_map(|&i| selected.and_then(|s| s.messages.get(i)).map(|m| m.uid as u32)).collect();
             if options.len() == 1 {
                 return Ok(Ok(format!("{}SEARCH completed, result saved", if uid { "UID " } else { "" })));
             }
@@ -2320,9 +2401,20 @@ impl Session {
                         Err(_) => Err("BAD connection lost".into()),
                     });
                 }
+                change = async {
+                    match self.notify.as_mut() {
+                        Some(notify) => notify.metadata.recv().await.ok(),
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Some(change) = change {
+                        self.notify_metadata(change).await?;
+                    }
+                }
                 change = changes.recv() => {
-                    // A lagged receiver just means "something changed".
-                    if change.as_ref().is_ok_and(|c| c.account_id != account) {
+                    // A lagged receiver just means "something changed". Under NOTIFY, other
+                    // mailboxes than the selected one's owner's are of interest too.
+                    if self.notify.is_none() && change.as_ref().is_ok_and(|c| c.account_id != account) {
                         continue;
                     }
                     if matches!(change, Err(tokio::sync::broadcast::error::RecvError::Closed)) {
@@ -2336,6 +2428,14 @@ impl Session {
             }
         }
     }
+}
+
+/// A MODSEQ criterion, at any depth of the search program.
+fn mentions_modseq(args: &[Arg]) -> bool {
+    args.iter().any(|arg| match arg {
+        Arg::List(inner) => mentions_modseq(inner),
+        other => other.atom_upper().as_deref() == Some("MODSEQ"),
+    })
 }
 
 async fn handle(app: AppState, tcp: TcpStream, peer: SocketAddr, starttls: bool) {
@@ -2372,7 +2472,9 @@ pub async fn serve_starttls(app: AppState, listener: TcpListener) {
 async fn serve_mode(app: AppState, listener: TcpListener, starttls: bool) {
     loop {
         match listener.accept().await {
-            Ok((tcp, peer)) => {
+            Ok((tcp, mut peer)) => {
+                // On a dual-stack socket IPv4 clients appear as ::ffff:a.b.c.d.
+                peer.set_ip(peer.ip().to_canonical());
                 tokio::spawn(handle(app.clone(), tcp, peer, starttls));
             }
             Err(err) => {

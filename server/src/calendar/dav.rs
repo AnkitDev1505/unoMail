@@ -765,7 +765,9 @@ async fn without_missing(response: Response) -> Response {
         let Some(len) = rest[start..].find("</D:propstat>") else { break };
         let end = start + len + "</D:propstat>".len();
         out.push_str(&rest[..start]);
-        if !rest[start..end].contains("404 Not Found") {
+        // The block's own status: the data in it may say anything.
+        let block = &rest[start..end];
+        if !block.rfind("<D:status>").is_some_and(|at| block[at..].contains("404 Not Found")) {
             out.push_str(&rest[start..end]);
         }
         rest = &rest[end..];

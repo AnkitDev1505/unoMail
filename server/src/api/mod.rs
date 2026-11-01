@@ -562,7 +562,7 @@ pub fn router(state: AppState) -> Router {
         .route("/me/calendars/{id}/events", post(calendar::event_create))
         .route("/me/calendars/{id}/events/{object_id}", get(calendar::event).put(calendar::event_update).delete(calendar::event_delete))
         .route("/me/calendars/{id}/export", get(calendar::export))
-        .route("/me/calendars/{id}/import", post(calendar::import))
+        .route("/me/calendars/{id}/import", post(calendar::import).layer(DefaultBodyLimit::max(64 * 1024 * 1024)))
         .route("/ldap", get(extend::ldap_get).put(extend::ldap_put))
         .route("/ldap/test", post(extend::ldap_test))
         .route("/skins", get(extend::skins_get).put(extend::skins_put))

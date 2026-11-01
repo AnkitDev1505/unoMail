@@ -18,8 +18,8 @@ import {
   alpha, Alert, Box, Button, Chip, Divider, IconButton, ListItemIcon, ListItemText, Menu, MenuItem, Paper, Select,
   Stack, Tooltip, Typography, useMediaQuery, useTheme,
 } from '@mui/material';
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { formatBytes, uploadBlob, errorText } from '../lib/api';
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import { downloadUrl, formatBytes, uploadBlob, errorText } from '../lib/api';
 import { useAuth } from '../app';
 import { type ComposerHandle, emit, usePlugins } from '../lib/plugins';
 import { composerClosed, composerOpened } from '../plugins/host';
@@ -31,7 +31,7 @@ import { EmojiPicker } from './EmojiPicker';
 import { FormattingToolbar, SendButton } from './ComposerTools';
 import { fetchSmime } from './Smime';
 import { isNetworkError, performOrQueue } from './outbox';
-import { pendingFilesAvailable, removePendingFiles, storePendingFile } from './pendingFiles';
+import { isPendingId, pendingFilesAvailable, removePendingFiles, storePendingFile } from './pendingFiles';
 import { fetchKeys, isUnlocked, lookupKeys } from './pgp';
 import { escapeHtml, sanitizeEmailHtml } from './sanitize';
 
@@ -64,6 +64,8 @@ export interface ComposerProps {
   sentId: string;
   /** A stored draft this composer continues (its copy is replaced on save and send). */
   draftEmailId?: string;
+  /** Filled with a function that stores the message; false when it could not be kept. */
+  flushRef?: { current: (() => Promise<boolean>) | null };
   /**
    * `queued` is set when the message was stored to be sent once the connection returns;
    * `info` says how to call the message back, or when it is scheduled.
@@ -78,7 +80,7 @@ export interface SentInfo extends Sent {
   scheduledAt?: Date;
 }
 
-export function Composer({ initial, accountId, draftsId, sentId, draftEmailId, onClose }: ComposerProps) {
+export function Composer({ initial, accountId, draftsId, sentId, draftEmailId, flushRef, onClose }: ComposerProps) {
   const { account } = useAuth();
   const prefs = usePrefs();
   const plugins = usePlugins();
@@ -97,7 +99,7 @@ export function Composer({ initial, accountId, draftsId, sentId, draftEmailId, o
   const [templateAnchor, setTemplateAnchor] = useState<HTMLElement | null>(null);
   const [signatures, setSignatures] = useState<Signatures | null>(null);
   const [signatureAnchor, setSignatureAnchor] = useState<HTMLElement | null>(null);
-  const [encrypt, setEncrypt] = useState(false);
+  const [encrypt, setEncrypt] = useState(initial.encrypted === true);
   const [wantFullScreen, setFullScreen] = useState(false);
   const [minimized, setMinimized] = useState(false);
   const [formatting, setFormatting] = useState(true);
@@ -115,7 +117,7 @@ export function Composer({ initial, accountId, draftsId, sentId, draftEmailId, o
   const [receipt, setReceipt] = useState(Boolean(initial.receiptTo));
   // S/MIME is offered once the user has a certificate.
   const [smimeAvailable, setSmimeAvailable] = useState(false);
-  const [smime, setSmime] = useState({ sign: false, encrypt: false });
+  const [smime, setSmime] = useState(initial.smime ?? { sign: false, encrypt: false });
   useEffect(() => {
     fetchSmime().then((s) => setSmimeAvailable(Boolean(s.certificate)), () => {});
   }, []);
@@ -171,7 +173,8 @@ export function Composer({ initial, accountId, draftsId, sentId, draftEmailId, o
       }
       const root = editor.current;
       if (!root || turn !== signatureTurn.current) return;
-      const existing = root.querySelector(`.${SIGNATURE_CLASS}`);
+      // At the top level only: one further down belongs to the quoted message.
+      const existing = root.querySelector(`:scope > .${SIGNATURE_CLASS}`);
       if (existing) {
         if (signature) existing.innerHTML = signature;
         else existing.remove();
@@ -199,10 +202,32 @@ export function Composer({ initial, accountId, draftsId, sentId, draftEmailId, o
   );
 
   useEffect(() => {
-    if (editor.current) editor.current.innerHTML = sanitizeEmailHtml(initial.html);
+    let cancelled = false;
+    const root = editor.current;
+    if (root) {
+      // Images of a message being continued refer to its parts; they are shown from local copies.
+      root.innerHTML = sanitizeEmailHtml(initial.html, (cid) => `cid:${cid}`);
+      for (const img of Array.from(root.querySelectorAll('img[src^="cid:"]'))) {
+        const cid = (img.getAttribute('src') ?? '').slice(4);
+        const part = initial.attachments.find((a) => a.cid === cid);
+        if (!part || isPendingId(part.blobId)) continue;
+        void fetch(downloadUrl(accountId, part.blobId, part.name), { credentials: 'same-origin' })
+          .then((response) => (response.ok ? response.blob() : null))
+          .then((blob) => {
+            if (!blob || cancelled) return;
+            const url = URL.createObjectURL(blob);
+            inlineImages.current.set(url, cid);
+            img.setAttribute('src', url);
+          })
+          .catch(() => {});
+      }
+    }
     const urls = inlineImages.current;
-    return () => urls.forEach((_, url) => URL.revokeObjectURL(url));
-  }, [initial.html]);
+    return () => {
+      cancelled = true;
+      urls.forEach((_, url) => URL.revokeObjectURL(url));
+    };
+  }, [initial.html, initial.attachments, accountId]);
 
   // Sender identities: when replying, prefer the address the original was sent to.
   useEffect(() => {
@@ -239,31 +264,63 @@ export function Composer({ initial, accountId, draftsId, sentId, draftEmailId, o
     return { to, cc, bcc, subject, html, attachments: used, inReplyTo: initial.inReplyTo, references: initial.references, from, replyTo: identity?.reply_to || undefined };
   }, [to, cc, bcc, subject, attachments, initial.inReplyTo, initial.references, initial.from, identity]);
 
+  // The message's text lives in the editor, not in React state: this makes a change re-render,
+  // which is what starts (and restarts) the auto-save timer below.
+  const [, changed] = useReducer((n: number) => n + 1, 0);
   const markDirty = () => {
     dirty.current = true;
     setStatus('');
+    changed();
   };
+
+  // A message that is going to be encrypted is never stored on the server in the clear.
+  const secret = encrypt || smime.encrypt;
+  /** The auto-save under way; whoever replaces or removes the draft waits for it. */
+  const inFlight = useRef<Promise<void> | null>(null);
+  const settled = () => inFlight.current ?? Promise.resolve();
 
   // Auto-save: a few seconds after the last change the draft is stored on the server.
   useEffect(() => {
     if (!dirty.current) return;
-    // A message that is going to be encrypted is never stored on the server in the clear.
-    if (encrypt) return;
-    const timer = setTimeout(async () => {
+    if (secret) return;
+    const timer = setTimeout(() => {
       if (saving.current || closed.current) return;
       saving.current = true;
       dirty.current = false;
-      try {
-        draftId.current = await saveDraft(currentDraft(), draftsId, draftId.current);
-        if (!closed.current) setStatus(t('Draft saved'));
-      } catch {
-        dirty.current = true;
-        if (!closed.current) setStatus(t('Draft not saved'));
-      } finally {
-        saving.current = false;
-      }
+      inFlight.current = (async () => {
+        try {
+          draftId.current = await saveDraft(currentDraft(), draftsId, draftId.current);
+          if (!closed.current) setStatus(t('Draft saved'));
+        } catch {
+          dirty.current = true;
+          if (!closed.current) setStatus(t('Draft not saved'));
+        } finally {
+          saving.current = false;
+          inFlight.current = null;
+        }
+      })();
     }, AUTOSAVE_DELAY_MS);
     return () => clearTimeout(timer);
+  });
+
+  // For the page, which is about to put another message in this composer's place.
+  useEffect(() => {
+    if (!flushRef) return;
+    flushRef.current = async () => {
+      await settled();
+      if (!dirty.current) return true;
+      if (secret) return false;
+      try {
+        draftId.current = await saveDraft(currentDraft(), draftsId, draftId.current);
+        dirty.current = false;
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    return () => {
+      flushRef.current = null;
+    };
   });
 
   async function addFiles(files: FileList | File[] | null, inline: boolean) {
@@ -408,7 +465,7 @@ export function Composer({ initial, accountId, draftsId, sentId, draftEmailId, o
   async function send(at?: Date) {
     if (identity?.available === false) { setError(t('Selected sending address is unavailable. Choose another address.')); return; }
     const sender = identity?.email ?? initial.from?.email ?? account?.email;
-    const draft = { ...currentDraft(), receiptTo: receipt ? sender : undefined, smime: smimeAvailable ? smime : undefined };
+    const draft = { ...currentDraft(), receiptTo: receipt ? sender : undefined, smime: smimeAvailable ? smime : undefined, encrypted: encrypt || undefined };
     const undoSeconds = at ? undefined : (prefs.undo_send_seconds ?? 5);
     const options: SendOptions | undefined = at ? { sendAt: at } : undoSeconds ? { holdFor: undoSeconds } : undefined;
     if (!draft.to.trim() && !draft.cc.trim() && !draft.bcc.trim()) {
@@ -418,6 +475,7 @@ export function Composer({ initial, accountId, draftsId, sentId, draftEmailId, o
     setBusy(true);
     setError('');
     closed.current = true;
+    await settled();
     try {
       const sent = encrypt ? await sendWithEncryption(draft, options) : await sendEmail(draft, draftsId, sentId, draftId.current, options);
       releasePending();
@@ -428,7 +486,7 @@ export function Composer({ initial, accountId, draftsId, sentId, draftEmailId, o
       // Encrypted messages are not queued: encrypting needs the recipients' keys from the server.
       if (isNetworkError(err) && !encrypt) {
         try {
-          await performOrQueue({ type: 'send', draft, draftsId, sentId });
+          await performOrQueue({ type: 'send', draft, draftsId, sentId, sendAt: at?.toISOString(), previousDraftId: draftId.current });
           onClose(true, true);
           return;
         } catch (queueError) {
@@ -448,6 +506,7 @@ export function Composer({ initial, accountId, draftsId, sentId, draftEmailId, o
 
   async function discard() {
     closed.current = true;
+    await settled();
     releasePending();
     if (draftId.current) await destroyEmails([draftId.current]).catch(() => {});
     onClose(false);
@@ -455,11 +514,16 @@ export function Composer({ initial, accountId, draftsId, sentId, draftEmailId, o
 
   async function saveAndClose() {
     closed.current = true;
-    if (dirty.current && !encrypt) {
+    await settled();
+    // Nothing is closed that could not be kept: the text would be gone without a word.
+    if (dirty.current) {
       try {
-        await saveDraft(currentDraft(), draftsId, draftId.current);
-      } catch {
-        // Closing must not be blocked by a failed save; the last auto-saved copy remains.
+        if (secret) throw new Error(t('An encrypted message cannot be saved as a draft. Send it, or turn encryption off to keep it.'));
+        draftId.current = await saveDraft(currentDraft(), draftsId, draftId.current);
+      } catch (err) {
+        closed.current = false;
+        setError(errorText(err, t('Could not save the draft')));
+        return;
       }
     }
     releasePending();

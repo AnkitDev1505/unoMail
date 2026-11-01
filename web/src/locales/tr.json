@@ -2326,5 +2326,9 @@
   "A setup QR code is not available for this account: it cannot use both IMAP and SMTP, or its address is not plain ASCII.": "Bu hesap için kurulum QR kodu yok: hem IMAP hem SMTP kullanamıyor ya da adresi düz ASCII değil.",
   "Set up Thunderbird for Android by scanning a code instead of typing the server details. With 2-step verification on, create an app password with mail access above and show its QR code.": "Android için Thunderbird’ü sunucu bilgilerini yazmak yerine bir kod tarayarak kurun. İki adımlı doğrulama açıkken yukarıda posta erişimli bir uygulama parolası oluşturun ve QR kodunu gösterin.",
   "Set up Thunderbird for Android by scanning a code instead of typing the server details. The code carries your password; an app password with mail access works too.": "Android için Thunderbird’ü sunucu bilgilerini yazmak yerine bir kod tarayarak kurun. Kod parolanızı içerir; posta erişimli bir uygulama parolası da çalışır.",
-  "Show": "Göster"
+  "Show": "Göster",
+  "Finish or close the message you are writing first": "Önce yazmakta olduğunuz iletiyi tamamlayın veya kapatın",
+  "An encrypted message cannot be saved as a draft. Send it, or turn encryption off to keep it.": "Şifreli bir ileti taslak olarak kaydedilemez. Gönderin veya saklamak için şifrelemeyi kapatın.",
+  "The server could not be reached. Please try again.": "Sunucuya ulaşılamadı. Lütfen yeniden deneyin.",
+  "The test event failed: {{status}}": "Test olayı başarısız oldu: {{status}}"
 }

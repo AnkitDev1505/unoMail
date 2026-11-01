@@ -2278,5 +2278,9 @@
   "A setup QR code is not available for this account: it cannot use both IMAP and SMTP, or its address is not plain ASCII.": "此账户无法使用设置二维码：它不能同时使用 IMAP 和 SMTP，或其地址不是纯 ASCII。",
   "Set up Thunderbird for Android by scanning a code instead of typing the server details. With 2-step verification on, create an app password with mail access above and show its QR code.": "扫描二维码即可设置 Android 版 Thunderbird，无需手动输入服务器信息。开启两步验证时，请在上方创建一个具有邮件权限的应用专用密码，并显示其二维码。",
   "Set up Thunderbird for Android by scanning a code instead of typing the server details. The code carries your password; an app password with mail access works too.": "扫描二维码即可设置 Android 版 Thunderbird，无需手动输入服务器信息。二维码中包含你的密码；具有邮件权限的应用专用密码也可以使用。",
-  "Show": "显示"
+  "Show": "显示",
+  "Finish or close the message you are writing first": "请先完成或关闭正在撰写的邮件",
+  "An encrypted message cannot be saved as a draft. Send it, or turn encryption off to keep it.": "加密邮件无法保存为草稿。请发送,或关闭加密以保留。",
+  "The server could not be reached. Please try again.": "无法连接服务器,请重试。",
+  "The test event failed: {{status}}": "测试事件失败:{{status}}"
 }

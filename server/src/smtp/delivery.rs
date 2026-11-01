@@ -305,6 +305,11 @@ pub async fn deliver_local(app: &App, d: LocalDelivery<'_>) -> Result<(), StoreE
             targets.push((mailbox, target.flags.clone()));
         }
     }
+    // Spam is not sent on, so a redirect cannot stand in for keeping it: it stays with the rest
+    // of the junk, where a false positive can still be found.
+    if junk && targets.is_empty() && !outcome.redirect.is_empty() {
+        targets.push((default_mailbox.id, Vec::new()));
+    }
 
     // Sort legitimate mail into its inbox category (stored as a keyword), as the user taught.
     if !junk && let Some(keyword) = crate::categories::categorize(&app.db, d.account_id, d.raw).await.keyword() {

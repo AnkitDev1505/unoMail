@@ -243,6 +243,27 @@ async fn mail_clients_sign_in_with_access_tokens() {
     }
     assert!(selected);
 
+    // A second factor is not skipped by a token: mail programs then need an app password.
+    let bob_id: i64 = sqlx::query_scalar("SELECT id FROM accounts WHERE email = 'bob@example.org'").fetch_one(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO totp_secrets (account_id, secret, enabled, created_at) VALUES (?, ?, 1, 0)").bind(bob_id).bind(env.app.secrets.seal("JBSWY3DPEHPK3PXP")).execute(&env.app.db).await.unwrap();
+    let mut c = Client::connect_tls(imap).await;
+    c.read_line().await.unwrap();
+    c.send_raw(format!("t1 AUTHENTICATE XOAUTH2 {}\r\n", xoauth2("bob@example.org", "token-bob")).as_bytes()).await;
+    let mut refused = false;
+    for _ in 0..3 {
+        let line = c.read_line().await.unwrap();
+        assert!(!line.starts_with("t1 OK"), "{line}");
+        if line.starts_with("t1 NO") {
+            refused = true;
+            break;
+        }
+        c.send_raw(b"\r\n").await;
+    }
+    assert!(refused);
+    sqlx::query("DELETE FROM totp_secrets").execute(&env.app.db).await.unwrap();
+    // This test's other refusals come from the same address, and have their own allowance.
+    env.app.limiter.unblock("ip:127.0.0.1");
+
     let mut c = Client::connect_tls(imap).await;
     c.read_line().await.unwrap();
     let bearer = STANDARD.encode("n,a=bob@example.org,\x01host=mail.test.example\x01port=993\x01auth=Bearer token-bob\x01\x01");

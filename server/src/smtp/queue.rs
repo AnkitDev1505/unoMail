@@ -10,6 +10,7 @@ use crate::{
         delivery::{self, LocalDelivery, Resolution, Target},
         dsn::{self, Action, Dsn},
     },
+    store::StoreError,
     util::{Address, now, sanitize_line},
 };
 
@@ -162,9 +163,30 @@ async fn attempt(app: &App, entry: Entry) {
 
     let raw = match app.store.read_blob(&entry.blob_hash).await {
         Ok(raw) => raw,
+        // Storage trouble passes: only content that is really gone, or still unreadable when the
+        // entry expires, ends the delivery. Either way the sender hears about it.
+        Err(err) if !matches!(err, StoreError::NotFound) && now() < entry.expires_at => {
+            tracing::warn!(%err, id = entry.id, "queued message content cannot be read, trying again later");
+            let reason = format!("message content cannot be read: {err}");
+            event("deferred", &reason).await;
+            let attempts = entry.attempts + 1;
+            let res = sqlx::query("UPDATE queue SET status = 'queued', attempts = ?, next_attempt_at = ?, last_error = ? WHERE id = ?")
+                .bind(attempts)
+                .bind(now() + backoff(attempts))
+                .bind(sanitize_line(&reason))
+                .bind(entry.id)
+                .execute(&app.db)
+                .await;
+            if let Err(err) = res {
+                tracing::error!(%err, id = entry.id, "failed to reschedule queue entry");
+            }
+            return;
+        }
         Err(err) => {
-            tracing::error!(%err, id = entry.id, "queued message content is missing, dropping entry");
-            event("bounced", "message content missing").await;
+            tracing::error!(%err, id = entry.id, "queued message content is lost, bouncing");
+            let reason = "the message content was lost on this server";
+            event("bounced", reason).await;
+            bounce_with(app, &entry.sender, &entry.recipient, reason, b"", &entry.dsn()).await;
             remove().await;
             return;
         }
@@ -177,7 +199,11 @@ async fn attempt(app: &App, entry: Entry) {
     let request = if entry.sender.is_empty() { Dsn { require_tls: request.require_tls, ..Dsn::default() } } else { request };
     let outcome = tracing::Instrument::instrument(async { match (Address::parse(&entry.recipient), entry.relay_identity_id) {
         (None, _) => Err(SendError::Permanent("invalid recipient address".into())),
-        (Some(recipient), None) => client::deliver_with(app, &entry.sender, &recipient, &raw, Some(&request)).await,
+        (Some(recipient), None) => match deliver_here(app, &entry, &recipient, &raw).await {
+            Ok(true) => Ok(("delivered on this server".to_owned(), false)),
+            Ok(false) => client::deliver_with(app, &entry.sender, &recipient, &raw, Some(&request)).await,
+            Err(err) => Err(err),
+        },
         (Some(recipient), Some(identity)) => match client::Relay::load(app, identity).await {
             Ok(Some(relay)) => client::deliver_via_with(app, &relay, &entry.sender, &recipient, &raw, Some(&request)).await,
             // The identity was removed (or its password can no longer be read) after queueing.
@@ -233,6 +259,34 @@ async fn attempt(app: &App, entry: Entry) {
             remove().await;
         }
     }
+}
+
+/// Delivers an entry whose recipient lives on this server, which is not reached over SMTP: it
+/// would refuse a connection from itself. False when the recipient is elsewhere.
+async fn deliver_here(app: &App, entry: &Entry, recipient: &Address, raw: &[u8]) -> Result<bool, SendError> {
+    let temporary = |err: String| SendError::Temporary(format!("local delivery failed: {err}"));
+    let targets = match delivery::resolve(app, recipient).await.map_err(|err| temporary(err.to_string()))? {
+        Resolution::NotLocal => return Ok(false),
+        Resolution::NoSuchUser => return Err(SendError::Permanent(format!("{recipient}: no such user here"))),
+        Resolution::Deliver(targets) => targets,
+    };
+    for target in targets {
+        match target {
+            Target::Trap => {}
+            Target::List { list_id, role } => {
+                let sender = crate::lists::Sender { envelope: &entry.sender, envelope_verified: false, author_verified: false };
+                crate::lists::receive(app, list_id, role, sender, raw, false).await.map_err(|err| temporary(format!("{err:?}")))?;
+            }
+            Target::Local { account_id, address } => {
+                let local = LocalDelivery { account_id, recipient: &address, sender: &entry.sender, raw, junk: false, remote: "", direction: Direction::Local, author_verified: false, sender_verified: false };
+                delivery::deliver_local(app, local).await.map_err(|err| temporary(err.to_string()))?;
+            }
+            Target::Remote(remote) => {
+                delivery::enqueue(app, &entry.sender, &remote, &entry.blob_hash, raw.len(), None).await.map_err(|err| temporary(err.to_string()))?;
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// Deliveries under way at once, in all and per receiving domain. A slow or unresponsive

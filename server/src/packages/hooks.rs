@@ -24,12 +24,14 @@ const PROTECTED_HEADERS: &[&str] = &[
     "arc-message-signature", "arc-authentication-results", "content-type", "content-transfer-encoding", "mime-version",
 ];
 
-/// Installed, enabled plug-ins with a server module that hooks `hook`, in a stable order.
+/// Installed, enabled plug-ins with a server module that hooks `hook`, in a stable order. A
+/// suspended one is passed over, unless mail must not get past it: its call then fails, and the
+/// message waits as the administrator chose.
 async fn hooked(app: &App, hook: &str) -> Vec<Installed> {
     let Ok(packages) = super::list(&app.db).await else { return Vec::new() };
     packages
         .into_iter()
-        .filter(|p| p.enabled && p.kind == "plugin" && !wasm::is_suspended(&p.id))
+        .filter(|p| p.enabled && p.kind == "plugin" && (p.fail_closed || !wasm::is_suspended(&p.id)))
         .filter(|p| p.manifest()["server"]["hooks"].as_array().is_some_and(|hooks| hooks.iter().any(|h| h == hook)))
         .collect()
 }

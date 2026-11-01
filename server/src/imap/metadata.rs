@@ -175,7 +175,10 @@ impl Session {
         });
         if !found.is_empty() {
             let mut out = b"* METADATA ".to_vec();
-            let name = target.mailbox.as_ref().map(|m| self.encode_name(&m.name)).unwrap_or_default();
+            let name = match &target.mailbox {
+                Some(mailbox) => self.client_name(mailbox).await,
+                None => String::new(),
+            };
             string(&mut out, name.as_bytes());
             out.extend_from_slice(b" (");
             for (i, (entry, value)) in found.iter().enumerate() {

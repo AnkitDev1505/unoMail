@@ -43,12 +43,12 @@ import { EmptyState, type EmptyKind } from './EmptyState';
 import { CategoryTabs } from './CategoryTabs';
 import { type LabelDialogState, MailSidebar } from './MailSidebar';
 import { EmailRow, type RowAction, type RowHandlers } from './EmailRow';
-import { type Destination, destinationOf, doneText, isFolderAction, type Origins, originsOf, type Place, placeOf, rolesOf } from './actions';
+import { type Destination, destinationOf, doneText, inFolderOf, isFolderAction, type Origins, originsOf, type Place, placeOf, rolesOf } from './actions';
 import { RowMenu, type RowMenuPick, type RowMenuTarget } from './RowMenu';
 import { AttachmentPreview, type PreviewFile } from './Preview';
 import { parseMailto } from './mailto';
 import { pageNotifier } from './notifications';
-import { draftFor, EMPTY_DRAFT } from './replyDraft';
+import { draftFor, draftFromStored, EMPTY_DRAFT } from './replyDraft';
 
 import { parseQuery, withScope } from './searchQuery';
 
@@ -90,6 +90,9 @@ export default function MailPage() {
   const [cursorShown, setCursorShown] = useState(false);
   const [thread, setThread] = useState<EmailFull[] | null>(null);
   const [draft, setDraft] = useState<{ key: number; draft: Draft; emailId?: string } | null>(null);
+  const composerFlush = useRef<(() => Promise<boolean>) | null>(null);
+  const emailCount = useRef(0);
+  const composeRef = useRef<(initial?: Draft, emailId?: string) => Promise<void>>(async () => {});
   const [notice, setNotice] = useState<{ text: string; undo?: () => void } | null>(null);
   /** Shows a notice, with an Undo button when `undo` is given; an empty text hides it. */
   const notify = useCallback((text: string, undo?: () => void) => setNotice(text ? { text, undo } : null), []);
@@ -154,7 +157,8 @@ export default function MailPage() {
   const subscriptionsPage = mailboxSlug === 'subscriptions' && !mailbox;
   const otherThan = useMemo(
     () => (allMail ? ['trash', 'junk'].map((role) => mailboxes.find((m) => m.role === role)?.id).filter((id): id is string => Boolean(id)) : undefined),
-    [allMail, mailboxes],
+    // By content: a new unread count must not count as another filter, which reloads the list.
+    [allMail, mailboxes.map((m) => `${m.id}:${m.role}`).join()],
   );
   const unreadInbox = mailboxes.find((m) => m.role === 'inbox')?.unreadEmails ?? 0;
   useTitle(
@@ -185,7 +189,8 @@ export default function MailPage() {
       folders = found ? { inMailbox: found.id } : { operator: 'OR', conditions: [] };
     }
     return withScope(parsed.filter, folders);
-  }, [serverSearch, mailboxes]);
+    // By content, as above.
+  }, [serverSearch, mailboxes.map((m) => `${m.id}:${m.role}:${m.name}`).join()]);
   const density = prefs.density ?? 'condensed';
 
   // Instant client-side filtering of what is already loaded, while the server search runs.
@@ -222,19 +227,20 @@ export default function MailPage() {
   const activeCategory = categorised && !serverSearch ? category : undefined;
 
   const load = useCallback(
-    async (position: number) => {
+    /** `keep`: rows to fetch from the top when refreshing, so that nothing scrolled to is lost. */
+    async (position: number, keep = PAGE_SIZE) => {
       if (!mailbox && !label && !allMail) return;
       const seq = ++requestSeq.current;
       const cacheKey = position === 0 && !serverSearch ? (label ? `label:${label}` : allMail ? 'all' : activeCategory ? `${mailbox!.id}:${activeCategory}` : mailbox!.id) : null;
       // Show the saved copy at once; the network result replaces it when it arrives.
       const saved = cacheKey ? cachedList<EmailSummary[]>(cacheKey) : undefined;
-      if (saved) {
+      if (saved && keep <= PAGE_SIZE) {
         setEmails(saved.emails);
         setTotal(saved.total);
       }
       setLoading(true);
       try {
-        const result = await queryEmails({ mailboxId: mailbox?.id, otherThan, label: label ?? undefined, search: searchFilter, category: activeCategory, position, limit: PAGE_SIZE });
+        let result = await queryEmails({ mailboxId: mailbox?.id, otherThan, label: label ?? undefined, search: searchFilter, category: activeCategory, position, limit: Math.max(keep, PAGE_SIZE) });
         if (categorised) refreshCategories();
         // A slower, older response must not overwrite a newer one.
         if (seq !== requestSeq.current) return;
@@ -245,6 +251,12 @@ export default function MailPage() {
           setPending(flushed.remaining);
           if (flushed.rejected.length > 0) notify(t('A change made offline was refused: {{value}}', { value: flushed.rejected[0] }));
           else if (flushed.done > 0) notify(t('{{count}} offline changes synchronised', { count: flushed.done }));
+          // The folder may have been left meanwhile, and the replay changed what is in it.
+          if (seq !== requestSeq.current) return;
+          if (flushed.done > 0) {
+            result = await queryEmails({ mailboxId: mailbox?.id, otherThan, label: label ?? undefined, search: searchFilter, category: activeCategory, position, limit: Math.max(keep, PAGE_SIZE) });
+            if (seq !== requestSeq.current) return;
+          }
         }
         if (cacheKey) cacheList(cacheKey, result.emails, result.total);
         setTotal(result.total);
@@ -329,7 +341,10 @@ export default function MailPage() {
         const unread = list.filter((e) => !e.keywords.$seen).map((e) => e.id);
         if (unread.length) {
           setEmails((current) => current.map((e) => (e.threadId === threadId ? { ...e, keywords: { ...e.keywords, $seen: true } } : e)));
-          void setKeyword(unread, '$seen', true).then(refreshMailboxes);
+          void setKeyword(unread, '$seen', true).then(refreshMailboxes, () => {
+            // Refused, for example in a shared folder without that right: it stays as it was.
+            setEmails((current) => current.map((e) => (e.threadId === threadId ? { ...e, keywords: { ...e.keywords, $seen: false } } : e)));
+          });
         }
       })
       .catch(() => !cancelled && !savedThread && notify(t('Could not open the conversation')));
@@ -362,10 +377,13 @@ export default function MailPage() {
   // for the life of the page: reopening it whenever the folder or the open conversation
   // changes would lose what the server announced in between. The handlers it calls are the
   // current ones, through a ref.
+  emailCount.current = emails.length;
   const onPush = useRef<() => void>(() => {});
   onPush.current = () => {
     void refreshMailboxes();
-    void load(0);
+    void load(0, emailCount.current);
+    // What arrived may belong to the conversation being read.
+    setThreadVersion((version) => version + 1);
     notifyNewMail();
   };
   useEffect(() => {
@@ -399,7 +417,22 @@ export default function MailPage() {
     return () => navigator.serviceWorker.removeEventListener('message', onMessage);
   }, [navigate]);
 
-  const open = useCallback((email: EmailSummary) => navigate(`/mail/${slug}/${email.threadId}`), [navigate, slug]);
+  const open = useCallback(
+    (email: EmailSummary) => {
+      // A draft is there to be finished. One waiting to go out is read, and can be called back.
+      if (mailbox?.role !== 'drafts' || !email.keywords.$draft || email.keywords.$scheduled) {
+        navigate(`/mail/${slug}/${email.threadId}`);
+        return;
+      }
+      void getThread(email.threadId)
+        .then(async (messages) => {
+          const stored = messages.find((message) => message.id === email.id);
+          if (stored) await composeRef.current(draftFromStored(stored, accountId), email.id);
+        })
+        .catch((err) => notify(errorText(err, t('The action failed'))));
+    },
+    [navigate, slug, mailbox?.role, notify, accountId],
+  );
   const closeThread = useCallback(() => navigate(`/mail/${slug}`), [navigate, slug]);
 
   /** Changes made offline wait in the outbox: show the offline state and how much is waiting. */
@@ -450,8 +483,12 @@ export default function MailPage() {
   const act = useCallback(
     async (target: EmailSummary | undefined, action: RowAction) => {
       if (!target) return;
-      const ids = thread && thread[0]?.threadId === target.threadId ? thread.map((e) => e.id) : [target.id];
-      const remove = () => setEmails((current) => current.filter((e) => e.threadId !== target.threadId));
+      // A conversation that is not open is looked up; offline, only the message at hand is known.
+      const conversation = async (): Promise<Pick<EmailSummary, 'id' | 'mailboxIds'>[]> => {
+        if (thread && thread[0]?.threadId === target.threadId) return thread;
+        return getThread(target.threadId).catch(() => [target]);
+      };
+      const remove =() => setEmails((current) => current.filter((e) => e.threadId !== target.threadId));
       const queued = () => {
         savedOffline();
         notify(t('Saved on this device; it will be synchronised when you are back online'));
@@ -466,16 +503,18 @@ export default function MailPage() {
         if (action === 'unread' || action === 'read') {
           const seen = action === 'read';
           setEmails((current) => current.map((e) => (e.threadId === target.threadId ? { ...e, keywords: { ...e.keywords, $seen: seen } } : e)));
+          const ids = (await conversation()).map((e) => e.id);
           if (await performOrQueue({ type: 'keyword', ids, keyword: '$seen', value: seen })) queued();
           // An open conversation would be marked as read again at once.
           if (!seen && threadId === target.threadId) closeThread();
         } else {
           const to = destinationOf(action, placeOf(roles, [target]), roles);
           if (!to) return;
-          const conversation = thread && thread[0]?.threadId === target.threadId ? thread : [target];
           remove();
           if (threadId === target.threadId) closeThread();
-          await relocate(ids, to, doneText(action, 1), originsOf(conversation));
+          const found = inFolderOf(await conversation(), target);
+          const members = found.length > 0 ? found : [target];
+          await relocate(members.map((e) => e.id), to, doneText(action, 1), originsOf(members));
           return;
         }
         void refreshMailboxes();
@@ -499,13 +538,26 @@ export default function MailPage() {
         if (await performOrQueue({ type: 'keyword', ids, keyword: name, value: on })) savedOffline();
         await refreshLabels();
       } catch (err) {
+        const undo = <T extends { id: string; keywords: Record<string, boolean> }>(e: T): T => (ids.includes(e.id) ? { ...e, keywords: { ...e.keywords, [name]: !on } } : e);
+        setThread((current) => current && current.map(undo));
         notify(errorText(err, t('Could not change the label')));
       }
     },
     [thread, refreshLabels, notify, savedOffline],
   );
 
-  const compose = useCallback((initial: Draft = EMPTY_DRAFT) => setDraft({ key: Date.now(), draft: initial }), []);
+  /** Opens a message in the composer; what is being written there is stored first. */
+  const compose = useCallback(
+    async (initial: Draft = EMPTY_DRAFT, emailId?: string) => {
+      if (composerFlush.current && !(await composerFlush.current())) {
+        notify(t('Finish or close the message you are writing first'));
+        return;
+      }
+      setDraft({ key: Date.now(), draft: initial, emailId });
+    },
+    [notify],
+  );
+  composeRef.current = compose;
 
   // Plug-ins report to the user through the page's own notice bar.
   useEffect(() => {
@@ -700,7 +752,11 @@ export default function MailPage() {
   const dropStyle = (key: string) => (dropTarget === key ? { outline: 2, outlineColor: 'primary.main', outlineStyle: 'dashed', bgcolor: 'action.hover' } : {});
   const ownMailboxes = mailboxes.filter((m) => !m.shareOwner);
   const sharedMailboxes = mailboxes.filter((m) => m.shareOwner);
-  const current = threadId ? emails.find((e) => e.threadId === threadId) : visible[cursor];
+  // A conversation can be open without being in the list. Without an open one, only the row the
+  // keyboard cursor visibly marks is acted on.
+  const current = threadId
+    ? (emails.find((e) => e.threadId === threadId) ?? (thread?.filter((e) => mailbox && e.mailboxIds[mailbox.id]).at(-1) ?? thread?.at(-1)))
+    : cursorShown ? visible[cursor] : undefined;
 
   // Keyboard shortcuts (Gmail style). Ignored while typing.
   useEffect(() => {
@@ -713,7 +769,9 @@ export default function MailPage() {
         if (event.key === 'Escape') target.blur();
         return;
       }
-      const last = thread?.[thread.length - 1];
+      // Enter on a button or a link is theirs.
+      if (event.key === 'Enter' && target.closest?.('a, button, [role="button"]')) return;
+      const last = thread?.filter((e) => !e.keywords.$draft).at(-1);
       switch (event.key) {
         case 'j':
           setCursor((c) => Math.min(c + 1, Math.max(visible.length - 1, 0)));
@@ -1116,7 +1174,8 @@ export default function MailPage() {
               onFolderAction={(action) => void act(current, action)}
               onMarkUnread={() => void act(current, 'unread')}
               onSnooze={async (until) => {
-                const ids = (thread ?? []).filter((e) => !e.keywords.$draft && !e.keywords.$scheduled).map((e) => e.id);
+                const open = thread ?? [];
+                const ids = (current ? inFolderOf(open, current) : open).filter((e) => !e.keywords.$draft && !e.keywords.$scheduled).map((e) => e.id);
                 try {
                   await snooze(ids, until);
                   notify(t('Snoozed until {{value}}', { value: until.toLocaleString(uiLocale(), NOTICE_TIME) }));
@@ -1130,7 +1189,8 @@ export default function MailPage() {
               onCancelScheduled={async (emailId) => {
                 try {
                   const pending = (await listScheduled()).find((s) => s.emailId === emailId);
-                  if (pending) await cancelSubmission(pending.id);
+                  if (!pending) throw new Error(t('The message has already been sent'));
+                  await cancelSubmission(pending.id);
                   notify(t('Sending cancelled. The message is in Drafts'));
                   setScheduledCount((n) => Math.max(0, n - 1));
                   closeThread();
@@ -1164,6 +1224,7 @@ export default function MailPage() {
           draftsId={drafts.id}
           sentId={sent.id}
           draftEmailId={draft.emailId}
+          flushRef={composerFlush}
           onClose={(wasSent, wasQueued, info) => {
             setDraft(null);
             if (wasQueued) {

@@ -20,6 +20,7 @@ const MAX_DEPTH: usize = 16;
 pub const MAX_REDIRECTS: usize = 5;
 const MAX_FILEINTO: usize = 10;
 const MAX_INCLUDE_DEPTH: usize = 5;
+const MAX_INCLUDES: usize = 64;
 const MAX_VARIABLES: usize = 100;
 const MAX_VARIABLE_BYTES: usize = 4000;
 const MAX_NOTIFY: usize = 3;
@@ -299,7 +300,8 @@ enum Test {
     Header { names: Vec<String>, keys: Vec<String>, spec: Spec },
     Address { names: Vec<String>, keys: Vec<String>, spec: Spec },
     Envelope { names: Vec<String>, keys: Vec<String>, spec: Spec },
-    Body { keys: Vec<String>, spec: Spec },
+    Body { keys: Vec<String>, spec: Spec, transform: BodyTransform },
+    HasFlag { variables: Vec<String>, keys: Vec<String>, spec: Spec },
     /// `string` test of the variables extension.
     Str { sources: Vec<String>, keys: Vec<String>, spec: Spec },
     Date { header: String, part: String, keys: Vec<String>, spec: Spec },
@@ -357,7 +359,7 @@ enum Command {
     Discard,
     FileInto { mailbox: String, copy: bool, create: bool, flags: Vec<String>, special_use: Option<String>, mailbox_id: Option<String> },
     Redirect { address: String, copy: bool },
-    Flags { op: FlagOp, flags: Vec<String> },
+    Flags { op: FlagOp, variable: Option<String>, flags: Vec<String> },
     Set { name: String, value: String, modifiers: Vec<String> },
     Vacation(Vacation),
     /// The commands of an included script; `once` scripts carry their name.
@@ -450,6 +452,12 @@ struct Parser<'a> {
     uses_variables: bool,
     /// Names of the enclosing `foreverypart` loops (for `break :name`); `""` for unnamed ones.
     loops: Vec<String>,
+    /// An included script asked for MIME parts: the message's parts are then parsed.
+    uses_mime: bool,
+    /// How the `body` test being read wants the body (RFC 5173).
+    body_transform: BodyTransform,
+    /// Scripts included so far in this compilation, at every level.
+    includes: std::rc::Rc<std::cell::Cell<usize>>,
 }
 
 fn has_variable(text: &str) -> bool {
@@ -620,9 +628,10 @@ impl Parser<'_> {
                     spec.zone = Zone::Fixed(minutes);
                 }
                 "originalzone" if allows("zone") => spec.zone = Zone::Original,
-                "text" | "raw" if allows("body") => {}
+                "text" if allows("body") => self.body_transform = BodyTransform::Text,
+                "raw" if allows("body") => self.body_transform = BodyTransform::Raw,
                 "content" if allows("body") => {
-                    self.string_list()?;
+                    self.body_transform = BodyTransform::Content(self.string_list()?);
                 }
                 "percent" if allows("percent") => return self.err(":percent needs spamtestplus, which is not supported"),
                 other => return self.err(format!("unsupported tag :{other}")),
@@ -740,8 +749,10 @@ impl Parser<'_> {
             }
             "body" => {
                 self.need("body", "the body test")?;
+                self.body_transform = BodyTransform::Text;
                 let spec = self.match_tags(&["body"])?;
-                Test::Body { keys: self.keys(&spec)?, spec }
+                let transform = std::mem::replace(&mut self.body_transform, BodyTransform::Text);
+                Test::Body { keys: self.keys(&spec)?, spec, transform }
             }
             "string" => {
                 self.need("variables", "the string test")?;
@@ -771,7 +782,14 @@ impl Parser<'_> {
             }
             "ihave" => {
                 self.need("ihave", "the ihave test")?;
-                Test::Ihave(self.string_list()?)
+                let names = self.string_list()?;
+                // What it asks about can be used where it holds, without a `require`.
+                for name in &names {
+                    if SUPPORTED.contains(&name.as_str()) && !self.has(name) {
+                        self.required.push(name.clone());
+                    }
+                }
+                Test::Ihave(names)
             }
             "spamtest" | "virustest" => {
                 self.need(&name, &format!("the {name} test"))?;
@@ -829,6 +847,17 @@ impl Parser<'_> {
             "valid_ext_list" => {
                 self.need("extlists", "the valid_ext_list test")?;
                 Test::ValidExtList(self.string_list()?)
+            }
+            "hasflag" => {
+                self.need("imap4flags", "the hasflag test")?;
+                let spec = self.match_tags(&[])?;
+                // hasflag [variables] keys
+                let first = self.keys(&spec)?;
+                if matches!(self.peek(), Some(Token::Str(_)) | Some(Token::Punct('['))) {
+                    Test::HasFlag { variables: first.iter().map(|v| v.to_ascii_lowercase()).collect(), keys: self.keys(&spec)?, spec }
+                } else {
+                    Test::HasFlag { variables: Vec::new(), keys: first, spec }
+                }
             }
             other => return self.err(format!("unknown test \"{other}\"")),
         })
@@ -926,6 +955,11 @@ impl Parser<'_> {
         if self.including.contains(&key) {
             return self.err(format!("script \"{name}\" includes itself"));
         }
+        // The depth limit alone still lets a few scripts multiply into an enormous program.
+        self.includes.set(self.includes.get() + 1);
+        if self.includes.get() > MAX_INCLUDES {
+            return self.err("too many scripts are included");
+        }
         let Some(source) = (self.loader)(&name, global) else {
             if optional {
                 return Ok(Command::Include { commands: Vec::new(), once: None });
@@ -936,7 +970,7 @@ impl Parser<'_> {
         let wrap = |err: SieveError| SieveError { line, message: format!("in included script \"{name}\": {err}") };
         let mut including = self.including.clone();
         including.push(key.clone());
-        let mut inner = Parser { tokens: tokenize(&source).map_err(wrap)?, pos: 0, required: Vec::new(), loader: self.loader, including, uses_variables: false, loops: Vec::new() };
+        let mut inner = Parser { tokens: tokenize(&source).map_err(wrap)?, pos: 0, required: Vec::new(), loader: self.loader, including, uses_variables: false, uses_mime: false, body_transform: BodyTransform::Text, loops: Vec::new(), includes: self.includes.clone() };
         let mut commands = Vec::new();
         while inner.peek().is_some() {
             if let Some(command) = inner.command(depth + 1).map_err(wrap)? {
@@ -944,6 +978,7 @@ impl Parser<'_> {
             }
         }
         self.uses_variables |= inner.uses_variables || inner.has("variables");
+        self.uses_mime |= inner.uses_mime || inner.has("mime") || inner.has("foreverypart");
         Ok(Command::Include { commands, once: once.then_some(key) })
     }
 
@@ -1057,6 +1092,14 @@ impl Parser<'_> {
                     Command::Redirect { address: parsed.to_string(), copy }
                 }
             }
+            // Variables are one namespace across included scripts here, so every one is global.
+            "global" => {
+                self.need("include", "global")?;
+                self.need("variables", "global")?;
+                self.string_list()?;
+                self.uses_variables = true;
+                Command::Include { commands: Vec::new(), once: None }
+            }
             "setflag" | "addflag" | "removeflag" => {
                 self.need("imap4flags", &name)?;
                 let op = match name.as_str() {
@@ -1064,7 +1107,14 @@ impl Parser<'_> {
                     "addflag" => FlagOp::Add,
                     _ => FlagOp::Remove,
                 };
-                Command::Flags { op, flags: self.string_list()? }
+                // [variable] flags
+                let first = self.string_list()?;
+                if matches!(self.peek(), Some(Token::Str(_)) | Some(Token::Punct('['))) {
+                    let Some(variable) = first.first().map(|v| v.to_ascii_lowercase()) else { return self.err("a variable name is needed") };
+                    Command::Flags { op, variable: Some(variable), flags: self.string_list()? }
+                } else {
+                    Command::Flags { op, variable: None, flags: first }
+                }
             }
             "set" => {
                 self.need("variables", "set")?;
@@ -1248,7 +1298,7 @@ pub fn compile_with(source: &str, loader: Loader<'_>) -> Result<Script, SieveErr
     if source.len() > MAX_SCRIPT_BYTES {
         return Err(SieveError { line: 1, message: "the script is too large".into() });
     }
-    let mut parser = Parser { tokens: tokenize(source)?, pos: 0, required: Vec::new(), loader, including: Vec::new(), uses_variables: false, loops: Vec::new() };
+    let mut parser = Parser { tokens: tokenize(source)?, pos: 0, required: Vec::new(), loader, including: Vec::new(), uses_variables: false, uses_mime: false, body_transform: BodyTransform::Text, loops: Vec::new(), includes: Default::default() };
     let mut commands = Vec::new();
     while parser.peek().is_some() {
         if let Some(command) = parser.command(0)? {
@@ -1256,8 +1306,16 @@ pub fn compile_with(source: &str, loader: Loader<'_>) -> Result<Script, SieveErr
         }
     }
     let variables = parser.uses_variables || parser.has("variables");
-    let mime = parser.has("mime") || parser.has("foreverypart");
+    let mime = parser.uses_mime || parser.has("mime") || parser.has("foreverypart");
     Ok(Script { commands, variables, mime })
+}
+
+/// How the `body` test looks at the body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BodyTransform {
+    Raw,
+    Text,
+    Content(Vec<String>),
 }
 
 /// What should happen to a message after the script ran.
@@ -1349,6 +1407,8 @@ struct Runtime<'a> {
     /// The header block as written (name, raw value with folding): what `editheader` edits.
     header_list: Vec<(String, String)>,
     body: &'a [u8],
+    /// The decoded parts, read when a `body` test first asks: a script may have thousands.
+    body_parts: std::cell::OnceCell<Option<Vec<BodyPart>>>,
     edits: usize,
     edited: bool,
     parts: Vec<MimePart>,
@@ -1462,9 +1522,9 @@ fn percent_decode(text: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'%'
             && i + 2 < bytes.len()
-            && let Ok(byte) = u8::from_str_radix(&text[i + 1..i + 3], 16)
+            && let (Some(high), Some(low)) = ((bytes[i + 1] as char).to_digit(16), (bytes[i + 2] as char).to_digit(16))
         {
-            out.push(byte);
+            out.push((high * 16 + low) as u8);
             i += 3;
             continue;
         }
@@ -1534,8 +1594,9 @@ fn parse_date(value: &str) -> Option<time::OffsetDateTime> {
 fn in_zone(when: time::OffsetDateTime, zone: Zone) -> time::OffsetDateTime {
     match zone {
         Zone::Original => when,
-        Zone::Server => when.to_offset(time::UtcOffset::UTC),
-        Zone::Fixed(minutes) => time::UtcOffset::from_whole_seconds(minutes * 60).map_or(when, |offset| when.to_offset(offset)),
+        // A date at the very edge of the calendar has no form in another zone: it stays as written.
+        Zone::Server => when.checked_to_offset(time::UtcOffset::UTC).unwrap_or(when),
+        Zone::Fixed(minutes) => time::UtcOffset::from_whole_seconds(minutes * 60).ok().and_then(|offset| when.checked_to_offset(offset)).unwrap_or(when),
     }
 }
 
@@ -1650,11 +1711,15 @@ fn apply_modifiers(mut value: String, modifiers: &[String]) -> String {
             _ => value.chars().count().to_string(),
         };
     }
-    value.truncate(MAX_VARIABLE_BYTES);
+    value.truncate(value.floor_char_boundary(MAX_VARIABLE_BYTES));
     value
 }
 
 /// The header block as (name, raw value) pairs, folding kept.
+fn decoded_key(name: &str) -> String {
+    format!("\0decoded:{name}")
+}
+
 fn split_headers(raw: &[u8]) -> Vec<(String, String)> {
     let head = String::from_utf8_lossy(&raw[..find_header_end(raw)]).into_owned();
     let mut out: Vec<(String, String)> = Vec::new();
@@ -1686,18 +1751,62 @@ fn index_headers(raw: &[u8]) -> (HashMap<String, Vec<String>>, HashMap<String, V
             headers.entry(name.to_ascii_lowercase()).or_default().push(unfold(value));
         }
         // Decoded forms, so that tests see the text users see.
+        // They are kept apart: they widen a search, but are not further header fields to count.
         if let Some(subject) = message.subject() {
-            headers.entry("subject".into()).or_default().push(subject.to_owned());
+            headers.entry(decoded_key("subject")).or_default().push(subject.to_owned());
         }
         for (name, list) in [("from", message.from()), ("to", message.to()), ("cc", message.cc()), ("bcc", message.bcc()), ("sender", message.sender()), ("reply-to", message.reply_to())] {
             if let Some(list) = list {
                 addresses.insert(name.into(), list.iter().filter_map(|a| a.address()).map(str::to_lowercase).collect());
                 let names: Vec<String> = list.iter().filter_map(|a| a.name()).map(str::to_owned).collect();
-                headers.entry(name.into()).or_default().extend(names);
+                headers.entry(decoded_key(name)).or_default().extend(names);
+            }
+        }
+        for (name, field) in [("resent-from", "Resent-From"), ("resent-to", "Resent-To"), ("resent-cc", "Resent-Cc")] {
+            if let Some(list) = message.header(field).and_then(mail_parser::HeaderValue::as_address) {
+                addresses.insert(name.into(), list.iter().filter_map(|a| a.address()).map(str::to_lowercase).collect());
             }
         }
     }
     (headers, addresses)
+}
+
+/// What the `body` test searches: the raw body, or decoded parts.
+fn body_values(parts: &Option<Vec<BodyPart>>, body: &[u8], transform: &BodyTransform) -> Vec<String> {
+    let (Some(parts), false) = (parts, matches!(transform, BodyTransform::Raw)) else {
+        return vec![String::from_utf8_lossy(body).trim().to_owned()];
+    };
+    parts
+        .iter()
+        .filter(|part| match transform {
+            BodyTransform::Content(wanted) => wanted.iter().any(|want| want.is_empty() || want.eq_ignore_ascii_case(&part.ctype) || want.eq_ignore_ascii_case(&format!("{}/{}", part.ctype, part.subtype))),
+            _ => part.ctype == "text",
+        })
+        .map(|part| part.text.clone())
+        .collect()
+}
+
+/// A leaf part of a message, decoded.
+struct BodyPart {
+    ctype: String,
+    subtype: String,
+    text: String,
+}
+
+fn body_parts(raw: &[u8]) -> Option<Vec<BodyPart>> {
+    let message = MessageParser::default().parse(raw)?;
+    Some(
+        message
+            .parts
+            .iter()
+            .take(MAX_PARTS)
+            .filter(|part| !matches!(part.body, mail_parser::PartType::Multipart(_) | mail_parser::PartType::Message(_)))
+            .map(|part| {
+                let (ctype, subtype) = part.content_type().map_or(("text".to_owned(), "plain".to_owned()), |ct| (ct.ctype().to_ascii_lowercase(), ct.subtype().unwrap_or("").to_ascii_lowercase()));
+                BodyPart { ctype, subtype, text: part.text_contents().map_or_else(|| String::from_utf8_lossy(part.contents()).into_owned(), str::to_owned) }
+            })
+            .collect(),
+    )
 }
 
 /// The MIME parts in depth-first order; part 0 is the message itself.
@@ -1758,7 +1867,7 @@ impl Runtime<'_> {
             rest = &rest[start + end + 1..];
         }
         out.push_str(rest);
-        out.truncate(MAX_VARIABLE_BYTES);
+        out.truncate(out.floor_char_boundary(MAX_VARIABLE_BYTES));
         out
     }
 
@@ -1819,7 +1928,11 @@ impl Runtime<'_> {
     fn header_values(&self, names: &[String], spec: &Spec) -> Vec<String> {
         let names: Vec<String> = names.iter().map(|n| self.expand(n).to_ascii_lowercase()).collect();
         let Some(option) = &spec.mime else {
-            return indexed(names.iter().filter_map(|n| self.headers.get(n)).flatten().cloned().collect(), spec.index);
+            let mut values: Vec<String> = names.iter().filter_map(|n| self.headers.get(n)).flatten().cloned().collect();
+            if spec.index.is_none() && !matches!(spec.how, Match::Count(_)) {
+                values.extend(names.iter().filter_map(|n| self.headers.get(&decoded_key(n))).flatten().cloned());
+            }
+            return indexed(values, spec.index);
         };
         let mut out = Vec::new();
         for part in self.mime_targets(spec).into_iter().filter_map(|i| self.parts.get(i)) {
@@ -1873,9 +1986,14 @@ impl Runtime<'_> {
                 let values = names.iter().map(|n| if n.eq_ignore_ascii_case("from") { self.env.from } else { self.env.to }).filter_map(|a| address_part(a, spec.part));
                 self.any(values, keys, spec)
             }
-            Test::Body { keys, spec } => {
-                let body = String::from_utf8_lossy(self.body).trim().to_owned();
-                self.any(std::iter::once(body), keys, spec)
+            Test::Body { keys, spec, transform } => {
+                let parts = self.body_parts.get_or_init(|| body_parts(self.env.raw));
+                let values = body_values(parts, self.body, transform);
+                self.any(values.into_iter(), keys, spec)
+            }
+            Test::HasFlag { variables, keys, spec } => {
+                let values: Vec<String> = if variables.is_empty() { self.flags.clone() } else { variables.iter().filter_map(|v| self.variables.get(v)).flat_map(|v| v.split_whitespace().map(str::to_owned).collect::<Vec<_>>()).collect() };
+                self.any(values.into_iter(), keys, spec)
             }
             Test::Str { sources, keys, spec } => {
                 let values: Vec<String> = sources.iter().map(|s| self.expand(s)).collect();
@@ -2050,19 +2168,31 @@ impl Runtime<'_> {
                         self.implicit_keep &= *copy;
                     }
                 }
-                Command::Flags { op, flags } => {
+                Command::Flags { op, variable, flags } => {
                     // Flag lists may be given as separate strings or space-separated.
                     let flags: Vec<String> = flags.iter().map(|f| self.expand(f)).flat_map(|f| f.split_whitespace().map(str::to_owned).collect::<Vec<_>>()).collect();
+                    // The internal flags, or the ones kept in a variable.
+                    let mut list = match variable {
+                        Some(name) => self.variables.get(name).map(|v| v.split_whitespace().map(str::to_owned).collect()).unwrap_or_default(),
+                        None => std::mem::take(&mut self.flags),
+                    };
                     match op {
-                        FlagOp::Set => self.flags = flags,
+                        FlagOp::Set => list = flags,
                         FlagOp::Add => {
                             for flag in flags {
-                                if !self.flags.iter().any(|f| f.eq_ignore_ascii_case(&flag)) {
-                                    self.flags.push(flag);
+                                if !list.iter().any(|f: &String| f.eq_ignore_ascii_case(&flag)) {
+                                    list.push(flag);
                                 }
                             }
                         }
-                        FlagOp::Remove => self.flags.retain(|f| !flags.iter().any(|r| r.eq_ignore_ascii_case(f))),
+                        FlagOp::Remove => list.retain(|f| !flags.iter().any(|r| r.eq_ignore_ascii_case(f))),
+                    }
+                    match variable {
+                        Some(name) if self.variables.len() < MAX_VARIABLES || self.variables.contains_key(name) => {
+                            self.variables.insert(name.clone(), list.join(" "));
+                        }
+                        Some(_) => {}
+                        None => self.flags = list,
                     }
                 }
                 Command::Set { name, value, modifiers } => {
@@ -2132,7 +2262,7 @@ impl Runtime<'_> {
                     if self.outcome.notify.len() >= MAX_NOTIFY || self.outcome.notify.iter().any(|n| n.to == to) {
                         continue;
                     }
-                    let subject = self.headers.get("subject").and_then(|s| s.last().cloned()).unwrap_or_default();
+                    let subject = self.headers.get(&decoded_key("subject")).or_else(|| self.headers.get("subject")).and_then(|s| s.last().cloned()).unwrap_or_default();
                     let from = self.addresses.get("from").and_then(|f| f.first().cloned()).unwrap_or_default();
                     let text = message.as_ref().map(|m| self.expand(m)).unwrap_or_else(|| format!("{from}: {subject}"));
                     self.outcome.notify.push(Notification {
@@ -2196,6 +2326,7 @@ impl Script {
             addresses,
             header_list: split_headers(env.raw),
             body: &env.raw[find_header_end(env.raw)..],
+            body_parts: std::cell::OnceCell::new(),
             edits: 0,
             edited: false,
             parts,
@@ -2386,6 +2517,15 @@ pub async fn delete(app: &crate::app::App, account_id: i64, name: &str) -> sqlx:
 
 /// The compiled active script of an account, if it has one. A stored script that no longer
 /// compiles is ignored (mail is kept in the inbox) rather than blocking delivery.
+/// Whether the active script still compiles once `name` is gone: if not, all filtering would
+/// silently stop.
+pub async fn active_survives_without(app: &crate::app::App, scripts: &[Stored], name: &str) -> bool {
+    let Some(active) = scripts.iter().find(|s| s.active && s.name != name) else { return true };
+    let Ok(globals) = globals(app).await else { return false };
+    let rest: Vec<Stored> = scripts.iter().filter(|s| s.name != name).cloned().collect();
+    compile_among(&active.script, &active.name, &rest, &globals).is_ok()
+}
+
 pub async fn active_script(app: &crate::app::App, account_id: i64) -> Option<Script> {
     let scripts = all(app, account_id).await.ok()?;
     let active = scripts.iter().find(|s| s.active)?;
@@ -2395,6 +2535,32 @@ pub async fn active_script(app: &crate::app::App, account_id: i64) -> Option<Scr
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_body_test_sees_decoded_text_or_what_it_is_told() {
+        use super::{BodyTransform, body_parts, body_values};
+        let raw = b"Subject: x\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\nemHFvMOzxYLEhw==\r\n--b\r\nContent-Type: text/html\r\n\r\n<b>x</b>\r\n--b--\r\n";
+        let body = &raw[super::find_header_end(raw)..];
+        let parts = body_parts(raw);
+        assert!(body_values(&parts, body, &BodyTransform::Text).iter().any(|v| v.contains("zażółć")));
+        let html = body_values(&parts, body, &BodyTransform::Content(vec!["text/html".into()]));
+        assert_eq!(html.len(), 1);
+        assert!(html[0].contains("<b>x</b>"));
+        assert!(body_values(&parts, body, &BodyTransform::Raw)[0].contains("emHFvMOzxYLEhw"));
+    }
+    #[test]
+    fn including_cannot_multiply_without_limit() {
+        let line = "include \"next\";\n".repeat(100);
+        let script = format!("require \"include\";\n{line}");
+        let found = compile_with(&script, &|name, _| (name == "next").then(|| "require \"include\";\n".to_owned()));
+        assert!(found.err().is_some_and(|err| err.message.contains("too many scripts")));
+    }
+
+    #[test]
+    fn percent_decoding_copes_with_multibyte_text() {
+        assert_eq!(percent_decode("%41b"), "Ab");
+        assert_eq!(percent_decode("%aż@x"), "%aż@x");
+        assert_eq!(percent_decode("%"), "%");
+    }
     use super::*;
 
     const MESSAGE: &[u8] = b"From: \"Big Boss\" <boss@corp.example>\r\nTo: bob@example.org\r\nCc: team@example.org\r\n\

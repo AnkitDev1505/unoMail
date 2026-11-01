@@ -81,6 +81,22 @@ impl Target {
         }
     }
 
+    /// The blobs actually there, when asking at once is possible; otherwise each is looked up.
+    async fn blobs_present(&self) -> anyhow::Result<Option<HashSet<String>>> {
+        Ok(match self {
+            Target::Dir(_) => None,
+            Target::S3(s3) => Some(s3.list("blobs/").await?.into_iter().filter_map(|name| name.rsplit('/').next().map(str::to_owned)).collect()),
+        })
+    }
+
+    async fn holds(&self, listing: &Option<HashSet<String>>, hash: &str) -> bool {
+        match (self, listing) {
+            (_, Some(listing)) => listing.contains(hash),
+            (Target::Dir(dir), None) => tokio::fs::try_exists(dir.join("blobs").join(relative_path(hash))).await.unwrap_or(false),
+            (Target::S3(_), None) => false,
+        }
+    }
+
     async fn delete(&self, name: &str) -> anyhow::Result<()> {
         match self {
             Target::Dir(dir) => match tokio::fs::remove_file(dir.join(name)).await {
@@ -226,6 +242,8 @@ async fn backup(app: &App, target: &Target, id: &str) -> anyhow::Result<Outcome>
     let mut outcome = Outcome { snapshot: id.to_owned(), ..Outcome::default() };
     let name = target.describe();
 
+    // Before the snapshot as well as after it: a message the snapshot holds may be gone by then.
+    let earlier: Vec<String> = sqlx::query_scalar("SELECT hash FROM blobs").fetch_all(&app.db).await?;
     // 1. The database, consistent at one point in time.
     let tmp = app.cfg.data_dir.join(format!("backup-{id}.db.tmp"));
     let _ = tokio::fs::remove_file(&tmp).await;
@@ -237,11 +255,17 @@ async fn backup(app: &App, target: &Target, id: &str) -> anyhow::Result<Outcome>
     let compressed = tokio::task::spawn_blocking(move || gzip(&database)).await??;
 
     // 2. The blobs the snapshot refers to, copying only those not there yet.
-    let hashes: Vec<String> = sqlx::query_scalar("SELECT hash FROM blobs ORDER BY hash").fetch_all(&app.db).await?;
+    let mut hashes: Vec<String> = sqlx::query_scalar("SELECT hash FROM blobs ORDER BY hash").fetch_all(&app.db).await?;
+    hashes.extend(earlier);
+    hashes.sort_unstable();
+    hashes.dedup();
     let copied: HashSet<String> = sqlx::query_scalar("SELECT hash FROM backup_blobs WHERE target = ?").bind(&name).fetch_all(&app.db).await?.into_iter().collect();
+    // What this server remembers copying is checked against the target: its contents may have
+    // been lost or replaced, and a snapshot listing what is not there cannot be restored.
+    let present = target.blobs_present().await?;
     let mut listed = Vec::with_capacity(hashes.len());
     for hash in hashes.into_iter().filter(|h| is_hash(h)) {
-        if !copied.contains(&hash) {
+        if !copied.contains(&hash) || !target.holds(&present, &hash).await {
             match app.store.blobs.get_stored(&hash).await {
                 Ok(stored) => {
                     outcome.bytes_copied += stored.len() as u64;
@@ -317,8 +341,10 @@ pub async fn schedule(app: crate::app::AppState) {
         }
         let today = now - now.rem_euclid(86_400);
         let done: Option<i64> = sqlx::query_scalar("SELECT 1 FROM backup_runs WHERE started_at >= ? AND status IN ('ok', 'running') LIMIT 1").bind(today).fetch_optional(&app.db).await.ok().flatten();
-        if done.is_none() {
-            let _ = run(&app).await;
+        if done.is_none()
+            && let Err(err) = run(&app).await
+        {
+            tracing::error!(error = %err, "the scheduled backup failed");
         }
     }
 }
@@ -342,18 +368,15 @@ pub async fn restore(cfg: &Config, snapshot: Option<&str>, force: bool) -> anyho
     }
     std::fs::create_dir_all(&cfg.data_dir)?;
     let db_path = cfg.data_dir.join("unomail.db");
-    if db_path.exists() {
-        anyhow::ensure!(force, "{} exists; stop the server and pass --force to replace it", db_path.display());
-        let aside = cfg.data_dir.join(format!("unomail.db.before-restore-{}", snapshot_id(now())));
-        std::fs::rename(&db_path, &aside)?;
-        for suffix in ["-wal", "-shm"] {
-            let _ = std::fs::remove_file(cfg.data_dir.join(format!("unomail.db{suffix}")));
-        }
-    }
+    anyhow::ensure!(force || !db_path.exists(), "{} exists; stop the server and pass --force to replace it", db_path.display());
+    // Everything that can fail comes before the current database is touched.
     let database = target.get(&format!("snapshots/{id}/unomail.db.gz")).await?.context("the snapshot has no database")?;
     let blobs: Blobs = crate::app::blob_backend(cfg)?;
     let database = blobs.open(&format!("snapshot:{id}"), database).map_err(|e| anyhow::anyhow!("the database snapshot cannot be decrypted: {e}"))?;
-    std::fs::write(&db_path, gunzip(&database)?)?;
+    let database = gunzip(&database)?;
+    let incoming = cfg.data_dir.join(format!("unomail.db.restoring-{id}"));
+    std::fs::write(&incoming, &database)?;
+    drop(database);
 
     let mut restored = 0usize;
     for hash in target.blob_list(&id).await? {
@@ -364,6 +387,18 @@ pub async fn restore(cfg: &Config, snapshot: Option<&str>, force: bool) -> anyho
         blobs.put_stored(&hash, stored).await?;
         restored += 1;
     }
+    if db_path.exists() {
+        // Kept aside whole: its latest commits may be in the write-ahead log.
+        let aside = format!("unomail.db.before-restore-{}", snapshot_id(now()));
+        std::fs::rename(&db_path, cfg.data_dir.join(&aside))?;
+        for suffix in ["-wal", "-shm"] {
+            let current = cfg.data_dir.join(format!("unomail.db{suffix}"));
+            if current.exists() {
+                std::fs::rename(&current, cfg.data_dir.join(format!("{aside}{suffix}")))?;
+            }
+        }
+    }
+    std::fs::rename(&incoming, &db_path)?;
     Ok(format!("restored snapshot {id} ({} messages, {restored} copied back)", manifest.blobs))
 }
 

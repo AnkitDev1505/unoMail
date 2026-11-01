@@ -19,10 +19,12 @@ const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(15);
 static CONNECTIONS: LazyLock<parking_lot::Mutex<HashMap<String, usize>>> = LazyLock::new(Default::default);
 struct ConnectionSlot(String);
 impl ConnectionSlot {
-    fn take(ip: std::net::IpAddr) -> Option<Self> {
+    /// `shared` is an address many clients come through (a trusted proxy, or a local one): the
+    /// limit per network would otherwise count all of them as one.
+    fn take(ip: std::net::IpAddr, shared: bool) -> Option<Self> {
         let network = crate::auth::network(ip);
         let mut open = CONNECTIONS.lock();
-        if open.values().sum::<usize>() >= 512 || open.get(&network).copied().unwrap_or(0) >= 128 { return None; }
+        if open.values().sum::<usize>() >= 512 || (!shared && open.get(&network).copied().unwrap_or(0) >= 128) { return None; }
         *open.entry(network.clone()).or_default() += 1;
         Some(Self(network))
     }
@@ -34,10 +36,10 @@ impl Drop for ConnectionSlot {
     }
 }
 
-pub async fn serve(listener: TcpListener, router: Router, tls: Option<Arc<ServerConfig>>) {
+pub async fn serve(listener: TcpListener, router: Router, tls: Option<Arc<ServerConfig>>, trusted_proxies: Vec<ipnet::IpNet>) {
     let acceptor = tls.map(TlsAcceptor::from);
     loop {
-        let (tcp, peer) = match listener.accept().await {
+        let (tcp, mut peer) = match listener.accept().await {
             Ok(conn) => conn,
             Err(err) => {
                 tracing::warn!(%err, "failed to accept HTTP connection");
@@ -45,7 +47,10 @@ pub async fn serve(listener: TcpListener, router: Router, tls: Option<Arc<Server
                 continue;
             }
         };
-        let Some(slot) = ConnectionSlot::take(peer.ip()) else { drop(tcp); continue };
+        // On a dual-stack socket IPv4 clients appear as ::ffff:a.b.c.d.
+        peer.set_ip(peer.ip().to_canonical());
+        let shared = peer.ip().is_loopback() || trusted_proxies.iter().any(|net| net.contains(&peer.ip()));
+        let Some(slot) = ConnectionSlot::take(peer.ip(), shared) else { drop(tcp); continue };
         let service = TowerToHyperService::new(router.clone().layer(Extension(PeerAddr(peer))));
         let acceptor = acceptor.clone();
         tokio::spawn(async move {

@@ -30,8 +30,9 @@ Create an A (and AAAA) record for `UNOMAIL_HOSTNAME`. For each domain,
 Images: `ghcr.io/rikodev/unomail` with tags `X.Y.Z`, `X.Y` and `latest`.
 
 1. Read the [release notes](https://github.com/RikoDEV/unoMail/releases).
-2. Back up: `docker compose exec -u unomail unomail unomail backup`. Keep copies of
-   `secret.key`, `blob.key` and `vapid.key`.
+2. Back up: `docker compose exec -u unomail unomail unomail backup`. This needs a backup target
+   (`UNOMAIL_BACKUP_DIR` or a bucket), which is not set by default. Keep copies of `secret.key`,
+   `blob.key` and `vapid.key`.
 3. Update: `docker compose pull && docker compose up -d`
 
 Migrations run at startup.

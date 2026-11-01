@@ -310,9 +310,13 @@ export default function CalendarPage() {
     }
   }, []);
 
+  const eventsTurn = useRef(0);
   const loadEvents = useCallback(async () => {
+    // Paging on quickly: an older answer must not overwrite a newer one.
+    const turn = ++eventsTurn.current;
     try {
-      setEvents(await get<Occurrence[]>(`/api/me/calendars/events?from=${from}&to=${to}`));
+      const found = await get<Occurrence[]>(`/api/me/calendars/events?from=${from}&to=${to}`);
+      if (turn === eventsTurn.current) setEvents(found);
     } catch (err) {
       setNotice(errorText(err, t('The events could not be loaded')));
     }

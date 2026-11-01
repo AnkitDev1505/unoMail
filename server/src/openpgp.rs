@@ -52,11 +52,22 @@ fn encryption_subkeys(key: &SignedPublicKey) -> Vec<&SignedPublicSubKey> {
 
 /// Whether a message is encrypted already (PGP/MIME, inline PGP or S/MIME).
 pub fn is_encrypted(raw: &[u8]) -> bool {
-    let headers = String::from_utf8_lossy(&raw[..find_header_end(raw).min(raw.len())]).to_ascii_lowercase();
+    const ARMOR: &[u8] = b"-----BEGIN PGP MESSAGE-----";
+    let end = find_header_end(raw).min(raw.len());
+    let headers = String::from_utf8_lossy(&raw[..end]).to_ascii_lowercase();
     let unfolded = headers.replace("\r\n\t", " ").replace("\r\n ", " ");
-    unfolded.lines().any(|line| {
-        line.starts_with("content-type:") && (line.contains("multipart/encrypted") || line.contains("application/pkcs7-mime") || line.contains("application/x-pkcs7-mime"))
-    }) || raw.windows(27).take(64 * 1024).any(|w| w == b"-----BEGIN PGP MESSAGE-----")
+    let content_type = unfolded.lines().find(|line| line.starts_with("content-type:")).unwrap_or("");
+    let body = raw[end..].trim_ascii();
+    // What the headers claim is checked against the body: a sender must not be able to keep a
+    // readable message out of the encryption by labelling it, or by quoting a PGP block.
+    if content_type.contains("multipart/encrypted") {
+        return body.windows(ARMOR.len()).take(64 * 1024).any(|w| w == ARMOR);
+    }
+    if content_type.contains("application/pkcs7-mime") || content_type.contains("application/x-pkcs7-mime") {
+        let base64 = |b: &u8| b.is_ascii_alphanumeric() || b.is_ascii_whitespace() || matches!(b, b'+' | b'/' | b'=');
+        return !content_type.contains("signed-data") && !body.is_empty() && body.iter().all(base64);
+    }
+    body.starts_with(ARMOR)
 }
 
 /// Splits a message into the headers that stay outside (routing, addressing, subject) and
@@ -204,6 +215,12 @@ pub mod tests {
 
         let raw = b"Received: from x\r\nFrom: Alice <alice@example.net>\r\nTo: bob@example.org\r\nSubject: Plans\r\nMIME-Version: 1.0\r\nContent-Type: text/plain;\r\n charset=utf-8\r\n\r\nThe secret plans\r\n";
         assert!(!is_encrypted(raw));
+        assert!(!is_encrypted(b"Subject: x\r\n\r\nLook at this:\r\n-----BEGIN PGP MESSAGE-----\r\n"), "only quoted");
+        assert!(!is_encrypted(b"Content-Type: multipart/encrypted; boundary=b\r\n\r\nplain text\r\n"), "only claimed");
+        assert!(!is_encrypted(b"Content-Type: application/pkcs7-mime; smime-type=signed-data\r\n\r\nAAAA\r\n"), "signed, not encrypted");
+        assert!(!is_encrypted(b"Content-Type: application/pkcs7-mime\r\n\r\nplain, text!\r\n"), "only claimed");
+        assert!(is_encrypted(b"Content-Type: application/pkcs7-mime; smime-type=enveloped-data\r\n\r\nAAAA\r\nBBBB\r\n"));
+        assert!(is_encrypted(b"Subject: x\r\n\r\n\r\n-----BEGIN PGP MESSAGE-----\r\nabc\r\n"));
         let encrypted = encrypt_message(&key, raw).unwrap();
         let text = String::from_utf8(encrypted.clone()).unwrap();
         assert!(text.starts_with("Received: from x\r\nFrom: Alice <alice@example.net>\r\nTo: bob@example.org\r\nSubject: Plans\r\nMIME-Version: 1.0\r\nContent-Type: multipart/encrypted;"), "{text}");

@@ -28,6 +28,39 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     out
 }
 
+/// Header text as RFC 2047 requires it: non-ASCII goes in encoded words of at most 75 characters.
+pub fn encode_header_text(text: &str) -> String {
+    if text.is_ascii() {
+        return text.to_owned();
+    }
+    let (mut words, mut chunk) = (Vec::new(), String::new());
+    for c in text.chars() {
+        // 45 bytes make 60 of base64, which with the markers stays within the limit.
+        if chunk.len() + c.len_utf8() > 45 {
+            words.push(format!("=?UTF-8?B?{}?=", base64::engine::general_purpose::STANDARD.encode(&chunk)));
+            chunk.clear();
+        }
+        chunk.push(c);
+    }
+    words.push(format!("=?UTF-8?B?{}?=", base64::engine::general_purpose::STANDARD.encode(&chunk)));
+    words.join("\r\n ")
+}
+
+/// A display name for an address header: quoted, or encoded when it is not ASCII.
+pub fn encode_phrase(name: &str) -> String {
+    let name = sanitize_line(name);
+    if name.is_ascii() { format!("\"{}\"", name.replace(['"', '\\'], "")) } else { encode_header_text(&name) }
+}
+
+/// An address as typed at sign-in, in the form accounts are stored in: the domain in ASCII.
+pub fn login_address(address: &str) -> String {
+    let address = address.trim().to_lowercase();
+    match address.rsplit_once('@') {
+        Some((local, domain)) if !domain.is_ascii() => normalize_domain(domain).map_or(address.clone(), |domain| format!("{local}@{domain}")),
+        _ => address,
+    }
+}
+
 /// Escapes text for HTML element content and attribute values.
 pub fn html_escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());

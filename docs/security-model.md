@@ -15,8 +15,10 @@ Threat model and review record: [SECURITY.md](../SECURITY.md).
 | One account from one address | 5 |
 | One account from anywhere | 20 |
 
-Repeated lockouts last four times longer each time, up to a day. Another user's failed
-guesses never lock you out from your own address.
+Repeated lockouts last four times longer each time, up to a day. The limit for one account
+from one address never touches you at another address. The limit for one account from
+anywhere does: it stops guessing spread over many networks, and at the price that such
+guessing can lock the owner out for a while. An administrator can lift the lock.
 
 ## Sessions
 
@@ -69,4 +71,5 @@ The operator can read all mail except OpenPGP-encrypted mail.
 ## Container
 
 The server runs unprivileged with only `CAP_NET_BIND_SERVICE`. Rspamd, Redis and ClamAV run as
-separate users and listen on loopback only.
+separate users and are reached over Unix sockets, with no TCP listener; the sockets'' permissions
+decide who may talk to them.

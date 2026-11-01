@@ -13,7 +13,7 @@ done
 # Whole-message virus scanning talks to clamd directly; without ClamAV there is nothing to ask.
 if [ "${CLAMAV_ENABLED:-true}" = "true" ]; then
     export UNOMAIL_CLAMAV_ADDR="${UNOMAIL_CLAMAV_ADDR:-unix:/run/clamav/clamd.sock}"
-else
+elif [ -z "${UNOMAIL_CLAMAV_ADDR:-}" ]; then
     unset UNOMAIL_CLAMAV_ADDR
 fi
 exec s6-setuidgid unomail /usr/local/bin/unomail

@@ -527,6 +527,20 @@ impl Drop for UploadSlot {
     }
 }
 
+/// Whether an upload fits: waiting uploads count against the mailbox's free space, and are capped
+/// in any case. One with the same content replaces its earlier copy.
+pub(crate) async fn upload_fits(app: &crate::app::App, account: &crate::auth::Account, hash: &str, size: usize) -> sqlx::Result<bool> {
+    let pending: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(size), 0) FROM uploads WHERE account_id = ? AND created_at >= ? AND hash != ?")
+        .bind(account.id)
+        .bind(crate::util::now() - 86_400)
+        .bind(hash)
+        .fetch_one(&app.db)
+        .await?;
+    let used: i64 = sqlx::query_scalar("SELECT used_bytes FROM accounts WHERE id = ?").bind(account.id).fetch_one(&app.db).await?;
+    let room = if account.quota_bytes > 0 { (account.quota_bytes - used).min(MAX_PENDING_UPLOAD_BYTES) } else { MAX_PENDING_UPLOAD_BYTES };
+    Ok(pending + size as i64 <= room)
+}
+
 async fn upload(State(state): State<AppState>, user: JmapUser, Path(account): Path<String>, headers: HeaderMap, body: axum::body::Body) -> Result<Response, ApiError> {
     own_account(&user, &account)?;
     // The size is checked before anything is read, and the body read no further than it.
@@ -541,17 +555,7 @@ async fn upload(State(state): State<AppState>, user: JmapUser, Path(account): Pa
         return Err(ApiError::bad("empty upload"));
     }
     // Pending uploads count against the mailbox's free space, and are capped in any case.
-    let hash_of_body = crate::util::sha256_hex(&body);
-    let pending: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(size), 0) FROM uploads WHERE account_id = ? AND created_at >= ? AND hash != ?")
-        .bind(user.account.id)
-        .bind(crate::util::now() - 86_400)
-        .bind(&hash_of_body)
-        .fetch_one(&state.db)
-        .await
-        .map_err(anyhow::Error::from)?;
-    let used: i64 = sqlx::query_scalar("SELECT used_bytes FROM accounts WHERE id = ?").bind(user.account.id).fetch_one(&state.db).await.map_err(anyhow::Error::from)?;
-    let room = if user.account.quota_bytes > 0 { (user.account.quota_bytes - used).min(MAX_PENDING_UPLOAD_BYTES) } else { MAX_PENDING_UPLOAD_BYTES };
-    if pending + body.len() as i64 > room {
+    if !upload_fits(&state, &user.account, &crate::util::sha256_hex(&body), body.len()).await.map_err(anyhow::Error::from)? {
         return Err(ApiError::Conflict("not enough space left for this upload: send or discard the drafts with attachments first".into()));
     }
     let content_type = headers

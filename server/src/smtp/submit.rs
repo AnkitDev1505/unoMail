@@ -287,7 +287,7 @@ pub async fn accept_inbound(app: &App, msg: Inbound<'_>) -> Outcome {
         Ok(Some(Verdict::Infected(name))) => {
             Metrics::inc(&app.metrics.spam_blocked);
             if !rt.virus_quarantine {
-                if !msg.trusted_relay {
+                if !msg.trusted_relay && accountable(app, msg.ip).await {
                     crate::security::reputation::report_abuse(app, msg.ip, crate::security::reputation::Abuse::Virus);
                 }
                 return reject("554 5.7.1 Message rejected: it contains a virus", format!("virus detected: {name}")).await;
@@ -337,7 +337,9 @@ pub async fn accept_inbound(app: &App, msg: Inbound<'_>) -> Outcome {
                     } else {
                         crate::security::reputation::Abuse::Spam
                     };
-                    crate::security::reputation::report_abuse(app, msg.ip, abuse);
+                    if accountable(app, msg.ip).await {
+                        crate::security::reputation::report_abuse(app, msg.ip, abuse);
+                    }
                 }
                 // Tell the sender (and the log) when the reason is malware rather than spam.
                 if scanner_found_virus {
@@ -381,7 +383,7 @@ pub async fn accept_inbound(app: &App, msg: Inbound<'_>) -> Outcome {
                 tracing::info!(score = assessment.score, sender = msg.sender, "message filed as junk by the built-in filter");
                 junk = true;
                 // The model called it phishing and the sender is not verified: a clear case.
-                if verified_domain.is_none() && assessment.hits.iter().any(|hit| hit.name == crate::security::ai_check::TEST) {
+                if verified_domain.is_none() && assessment.hits.iter().any(|hit| hit.name == crate::security::ai_check::TEST) && accountable(app, msg.ip).await {
                     crate::security::reputation::report_abuse(app, msg.ip, crate::security::reputation::Abuse::Phishing);
                 }
             }
@@ -393,7 +395,7 @@ pub async fn accept_inbound(app: &App, msg: Inbound<'_>) -> Outcome {
                 filter::learn(app, &assessment.keys, false).await;
             }
         }
-        if trapped {
+        if trapped && accountable(app, msg.ip).await {
             crate::security::access::karma(app, msg.ip, -5, "spam trap").await;
             crate::security::reputation::report_abuse(app, msg.ip, crate::security::reputation::Abuse::SpamTrap);
             tracing::info!(ip = %msg.ip, sender = msg.sender, "message to a spam trap");
@@ -403,7 +405,7 @@ pub async fn accept_inbound(app: &App, msg: Inbound<'_>) -> Outcome {
     // Spam verdicts from outside are the sender's word: only a trusted relay's are kept, so
     // that Sieve rules and mail programs see this server's own verdict alone.
     if !msg.trusted_relay {
-        stripped = remove_headers(&stripped, |name| name.len() > 7 && name[..7].eq_ignore_ascii_case("x-spam-"));
+        stripped = remove_headers(&stripped, |name| name.len() > 7 && name.as_bytes()[..7].eq_ignore_ascii_case(b"x-spam-"));
     }
     let id = random_token()[..12].to_owned();
     let received = format!(
@@ -465,6 +467,9 @@ pub async fn accept_inbound(app: &App, msg: Inbound<'_>) -> Outcome {
                             }
                         }
                         Err(StoreError::QuotaExceeded) => quota_failures.push(address.clone()),
+                        // Others already have it: a refusal would make the sender deliver it to
+                        // them again. This copy waits in the queue instead.
+                        Err(_) if !junk && delivered > 0 && retry_later(app, msg.sender, rcpt, &message).await => delivered += 1,
                         Err(err) => return internal("local delivery failed", err),
                     }
                 }
@@ -472,6 +477,7 @@ pub async fn accept_inbound(app: &App, msg: Inbound<'_>) -> Outcome {
                 Target::Trap => delivered += 1,
                 Target::List { list_id, role } => match crate::lists::receive(app, *list_id, *role, crate::lists::Sender { envelope: msg.sender, envelope_verified: sender_verified, author_verified }, &message, junk).await {
                     Ok(()) => delivered += 1,
+                    Err(_) if !junk && delivered > 0 && retry_later(app, msg.sender, rcpt, &message).await => delivered += 1,
                     Err(err) => return internal("mailing list failed", err),
                 },
                 Target::Remote(_) if junk => {
@@ -516,7 +522,13 @@ pub async fn accept_inbound(app: &App, msg: Inbound<'_>) -> Outcome {
     // dashboard with made-up results.
     if author_verified && !junk {
         let author_domain = MessageParser::default().parse_headers(&stripped).and_then(|m| m.from()?.first()?.address.as_deref().and_then(Address::parse)).map(|a| a.domain);
-        if let Some(domain) = author_domain
+        // Only what can be a report counts against a domain's daily allowance of them.
+        let may_be_report = {
+            use mail_parser::MimeHeaders;
+            MessageParser::default().parse_headers(&stripped).is_some_and(|m| m.parts.first().and_then(|part| part.content_type()).is_some_and(|ct| !ct.ctype().eq_ignore_ascii_case("text") && !ct.subtype().is_some_and(|s| s.eq_ignore_ascii_case("alternative"))))
+        };
+        if may_be_report
+            && let Some(domain) = author_domain
             && crate::dmarc_reports::report_allowed(&domain)
         {
             crate::dmarc_reports::ingest_mail(app, &stripped).await;
@@ -525,6 +537,18 @@ pub async fn accept_inbound(app: &App, msg: Inbound<'_>) -> Outcome {
         }
     }
     Outcome::Accepted(format!("250 2.0.0 Ok: queued as {id}"))
+}
+
+/// Queues a copy for a recipient this server could not take it for right now. Not for spam: the
+/// queue does not carry the verdict, and the copy would arrive as ordinary mail.
+async fn retry_later(app: &App, sender: &str, recipient: &Address, message: &[u8]) -> bool {
+    let Ok(hash) = app.store.put_blob(message).await else { return false };
+    delivery::enqueue(app, sender, recipient, &hash, message.len(), None).await.is_ok()
+}
+
+/// Whether a server's behaviour may be held against it: an administrator's whitelist says no.
+async fn accountable(app: &App, ip: std::net::IpAddr) -> bool {
+    !matches!(crate::security::access::check(app, ip).await, crate::security::access::Verdict::Allowed)
 }
 
 /// Tells a sender who asked for it (`NOTIFY=SUCCESS`) that `recipient` has the message now.
@@ -798,7 +822,7 @@ pub async fn submit(app: &App, sub: Submission<'_>) -> Outcome {
     let own = authn::strip_forged_results(sub.raw, &app.cfg.hostname);
     // What the sender's program says about itself, removed before signing if asked.
     let raw = if rt.privacy_remove_x_headers || rt.privacy_remove_user_agent {
-        remove_headers(&own, |name| (rt.privacy_remove_x_headers && name.len() > 2 && name[..2].eq_ignore_ascii_case("x-")) || (rt.privacy_remove_user_agent && name.eq_ignore_ascii_case("user-agent")))
+        remove_headers(&own, |name| (rt.privacy_remove_x_headers && name.len() > 2 && name.as_bytes()[..2].eq_ignore_ascii_case(b"x-")) || (rt.privacy_remove_user_agent && name.eq_ignore_ascii_case("user-agent")))
     } else {
         own
     };
@@ -820,6 +844,19 @@ pub async fn submit(app: &App, sub: Submission<'_>) -> Outcome {
         match target {
             // A user writing to a trap teaches nothing: the trap is for strangers.
             Target::Trap => {}
+            // A message to be released later waits for colleagues as for anyone else.
+            Target::Local { address, .. } if crate::smtp::dsn::current(&rcpt.to_string()).queueing.hold_until.is_some() => {
+                let queued = async {
+                    let hash = app.store.put_blob(&message).await.map_err(anyhow::Error::from)?;
+                    let local = Address::parse(address).ok_or_else(|| anyhow::anyhow!("invalid local address"))?;
+                    delivery::enqueue_via(app, &sender, &local, &hash, message.len(), Some(account.id), None).await?;
+                    anyhow::Ok(())
+                }
+                .await;
+                if let Err(err) = queued {
+                    return internal("failed to queue a held message", err);
+                }
+            }
             Target::Local { account_id, address } => {
                 let result = delivery::deliver_local(
                     app,

@@ -233,23 +233,37 @@ pub fn strip_forged_results(raw: &[u8], hostname: &str) -> Vec<u8> {
     let header_end = find_header_end(raw);
     let (headers, body) = raw.split_at(header_end);
     let mut out = Vec::with_capacity(raw.len());
-    let mut skipping = false;
+    let mut field: Vec<u8> = Vec::new();
     for line in headers.split_inclusive(|b| *b == b'\n') {
-        let continuation = matches!(line.first(), Some(b' ' | b'\t'));
-        if !continuation {
-            let text = String::from_utf8_lossy(line).to_ascii_lowercase();
-            skipping = text.starts_with("x-virus-status:")
-                || text.strip_prefix("authentication-results:").is_some_and(|value| {
-                    let authserv = value.trim().split(';').next().unwrap_or("").trim();
-                    authserv.eq_ignore_ascii_case(hostname)
-                });
+        // A whole field at a time: the value may start on a folded line.
+        if !matches!(line.first(), Some(b' ' | b'\t')) {
+            if !claims_our_verdict(&field, hostname) {
+                out.extend_from_slice(&field);
+            }
+            field.clear();
         }
-        if !skipping {
-            out.extend_from_slice(line);
-        }
+        field.extend_from_slice(line);
+    }
+    if !claims_our_verdict(&field, hostname) {
+        out.extend_from_slice(&field);
     }
     out.extend_from_slice(body);
     out
+}
+
+/// Read as `summary` reads headers: space around the name and folding make no difference.
+fn claims_our_verdict(field: &[u8], hostname: &str) -> bool {
+    let text = String::from_utf8_lossy(field);
+    let Some((name, value)) = text.split_once(':') else { return false };
+    match name.trim().to_ascii_lowercase().as_str() {
+        "x-virus-status" => true,
+        "authentication-results" => {
+            let value = super::summary::without_comments(value);
+            let authserv = value.split(';').next().unwrap_or("").split_whitespace().next().unwrap_or("");
+            authserv.eq_ignore_ascii_case(hostname)
+        }
+        _ => false,
+    }
 }
 
 /// Offset of the blank line separating headers from the body (or the message length).
@@ -261,6 +275,28 @@ pub fn find_header_end(raw: &[u8]) -> usize {
         .unwrap_or(raw.len())
 }
 
+#[cfg(test)]
+mod forged_results {
+    use super::strip_forged_results;
+
+    #[test]
+    fn every_spelling_of_our_own_verdict_is_removed() {
+        for forged in [
+            "Authentication-Results: mail.test; dmarc=pass\r\n",
+            "Authentication-Results : mail.test; dmarc=pass\r\n",
+            "Authentication-Results:\r\n mail.test; dmarc=pass\r\n",
+            "authentication-results:\tMAIL.test;\r\n\tdmarc=pass\r\n",
+            "Authentication-Results: (ok) mail.test 1; dmarc=pass\r\n",
+            "X-Virus-Status : Clean\r\n",
+        ] {
+            let raw = format!("From: a@b\r\n{forged}Subject: x\r\n\r\nbody\r\n");
+            let out = String::from_utf8(strip_forged_results(raw.as_bytes(), "mail.test")).unwrap();
+            assert_eq!(out, "From: a@b\r\nSubject: x\r\n\r\nbody\r\n", "{forged}");
+        }
+        let other = "Authentication-Results: other.example; dmarc=pass\r\n\r\nbody\r\n";
+        assert_eq!(String::from_utf8(strip_forged_results(other.as_bytes(), "mail.test")).unwrap(), other);
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -105,7 +105,7 @@ pub fn validate_skin(skin: &Value) -> Result<(), String> {
         let ok = match key.as_str() {
             "id" | "name" => true,
             "mode" => matches!(value.as_str(), Some("light" | "dark" | "auto")),
-            "primary" | "secondary" | "tertiary" | "error" | "background" | "paper" | "text" => is_color(value),
+            "primary" | "secondary" | "tertiary" | "error" | "background" | "paper" | "text" | "selected" => is_color(value),
             "radius" => value.as_u64().is_some_and(|r| r <= 32),
             "spacing" => value.as_u64().is_some_and(|s| (4..=12).contains(&s)),
             "fontScale" => value.as_f64().is_some_and(|s| (0.85..=1.25).contains(&s)),

@@ -76,7 +76,7 @@ pub fn redacted_headers(raw: &[u8]) -> String {
         let name = field.split(':').next().unwrap_or_default().trim().to_ascii_lowercase();
         match name.as_str() {
             "bcc" => {}
-            "to" | "cc" | "delivered-to" | "x-original-to" | "envelope-to" => out.push_str(&redact_addresses(&field)),
+            "to" | "cc" | "delivered-to" | "x-original-to" | "envelope-to" | "received" => out.push_str(&redact_addresses(&field)),
             _ => out.push_str(&field),
         }
     };

@@ -235,8 +235,10 @@ export function Login({ adding = false }: { adding?: boolean }) {
       }
       finished();
     } catch (err) {
-      if (err instanceof ApiError && err.status === 400 && err.message === 'captcha') setError(t('Complete the verification and try again.'));
-      else setError(err instanceof ApiError && err.status === 429 ? t('Too many attempts. Please try again later.') : t('Incorrect e-mail address or password.'));
+      if (err instanceof ApiError && err.status === 400 && err.message.toLowerCase() === 'captcha') setError(t('Complete the verification and try again.'));
+      else if (err instanceof ApiError && err.status === 429) setError(t('Too many attempts. Please try again later.'));
+      else if (err instanceof ApiError && err.status < 500) setError(t('Incorrect e-mail address or password.'));
+      else setError(t('The server could not be reached. Please try again.'));
       // An answer signs in once: the next try needs a new one.
       if (captcha !== undefined) setCaptchaRound((round) => round + 1);
     } finally {

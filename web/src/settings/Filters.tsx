@@ -332,7 +332,10 @@ export function FiltersCard() {
   useEffect(() => {
     void refreshNames();
   }, []);
+  // Nothing can be saved over a script until it has been read.
+  const [reload, setReload] = useState(0);
   useEffect(() => {
+    setLoaded(false);
     get<{ script: string; active: boolean }>(`/api/me/sieve?name=${encodeURIComponent(name)}`)
       .then((data) => {
         setScript(data.script);
@@ -343,7 +346,7 @@ export function FiltersCard() {
         setError('');
       })
       .catch(() => setError(t('Could not load the filter script')));
-  }, [name]);
+  }, [name, reload]);
   if (!loaded) return error ? <Alert severity="error">{error}</Alert> : null;
 
   const change = (next: string) => {
@@ -384,6 +387,8 @@ export function FiltersCard() {
     }
     setSaved(t('Script "{{name}}" deleted.', { name }));
     setName('main');
+    // Also when that is the script just deleted.
+    setReload((n) => n + 1);
     await refreshNames();
   }
 

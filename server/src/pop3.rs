@@ -16,7 +16,8 @@ use crate::{
 };
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
-const MAX_LINE: usize = 512;
+/// Long enough for the access token of a token login, which comes on one line.
+const MAX_LINE: usize = 16 * 1024;
 const MAX_ERRORS: u32 = 10;
 
 struct Session {
@@ -310,14 +311,21 @@ impl Session {
 
     /// The UPDATE state: deletions only take effect on a clean QUIT.
     async fn quit(&mut self) -> std::io::Result<()> {
+        let mut failed = false;
         if let Some(account) = &self.account {
             for index in &self.deleted {
                 if let Err(err) = self.app.store.delete_message(account.id, self.messages[*index].id).await {
                     tracing::warn!(%err, "POP3 could not delete message");
+                    failed = true;
                 }
             }
         }
-        self.ok("bye").await?;
+        // RFC 1939: the client must hear when messages stayed.
+        if failed {
+            self.err("some deleted messages not removed").await?;
+        } else {
+            self.ok("bye").await?;
+        }
         self.conn.shutdown().await;
         Ok(())
     }
@@ -343,7 +351,9 @@ async fn handle(app: AppState, tcp: TcpStream, peer: SocketAddr) {
 pub async fn serve(app: AppState, listener: TcpListener) {
     loop {
         match listener.accept().await {
-            Ok((tcp, peer)) => {
+            Ok((tcp, mut peer)) => {
+                // On a dual-stack socket IPv4 clients appear as ::ffff:a.b.c.d.
+                peer.set_ip(peer.ip().to_canonical());
                 tokio::spawn(handle(app.clone(), tcp, peer));
             }
             Err(err) => {

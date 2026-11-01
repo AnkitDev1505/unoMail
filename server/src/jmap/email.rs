@@ -405,11 +405,24 @@ async fn query_inner(ctx: &Context<'_>, args: &Map<String, Value>, cap: i64) -> 
         None => ctx.account.id,
     };
     let collapse = args.get("collapseThreads").and_then(Value::as_bool).unwrap_or(false);
-    let position = args.get("position").and_then(Value::as_i64).unwrap_or(0).max(0);
+    let position = args.get("position").and_then(Value::as_i64).unwrap_or(0);
+    if args.get("anchor").is_some_and(|anchor| !anchor.is_null()) {
+        return Err(MethodError::invalid("anchor is not supported"));
+    }
+    // Newest first unless asked otherwise; dates are the one order that is kept.
+    let order = match args.get("sort").and_then(Value::as_array).and_then(|sort| sort.first()) {
+        None => "DESC",
+        Some(comparator) if comparator["property"] == "receivedAt" => if comparator["isAscending"].as_bool().unwrap_or(true) { "ASC" } else { "DESC" },
+        Some(_) => return Err(MethodError("unsupportedSort", "only receivedAt can be sorted on".into())),
+    };
     let limit = args.get("limit").and_then(Value::as_i64).unwrap_or(50).clamp(0, cap);
 
-    // A thread is represented by its newest message (in the mailbox listed, if one is).
-    let thread = if collapse {
+    // A thread is represented by its newest message in the mailbox listed. With any other
+    // filter it is the newest one that matches: a reply without the label, or the last message
+    // being in Trash, must not hide the conversation.
+    let plain_folder = mailbox.is_some() && filter.len() == 1;
+    let by_thread = collapse && !plain_folder;
+    let thread = if collapse && plain_folder {
         "AND m.id = (SELECT m2.id FROM messages m2 WHERE m2.account_id = m.account_id AND m2.thread_id = m.thread_id AND (?2 IS NULL OR m2.mailbox_id = ?2) ORDER BY m2.internal_date DESC, m2.id DESC LIMIT 1)"
     } else {
         ""
@@ -444,8 +457,16 @@ async fn query_inner(ctx: &Context<'_>, args: &Map<String, Value>, cap: i64) -> 
         }
         query
     };
+    let count_all = if by_thread { format!("SELECT COUNT(DISTINCT m.thread_id) FROM messages m WHERE {conditions}") } else { format!("SELECT COUNT(*) FROM messages m WHERE {conditions}") };
+    // A negative position counts from the end of the results.
+    let position = if position < 0 { (bind_all(count_all.clone()).fetch_one(&ctx.app.db).await? + position).max(0) } else { position };
     let after = binds.len() + 3;
-    let ids: Vec<i64> = bind_all(format!("SELECT m.id FROM messages m WHERE {page_conditions} ORDER BY m.internal_date DESC, m.id DESC LIMIT ?{after} OFFSET ?{}", after + 1))
+    let page = if by_thread {
+        format!("SELECT id FROM (SELECT m.id AS id, m.internal_date AS at, ROW_NUMBER() OVER (PARTITION BY m.thread_id ORDER BY m.internal_date DESC, m.id DESC) AS turn FROM messages m WHERE {conditions}) WHERE turn = 1 ORDER BY at {order}, id {order} LIMIT ?{after} OFFSET ?{}", after + 1)
+    } else {
+        format!("SELECT m.id FROM messages m WHERE {page_conditions} ORDER BY m.internal_date {order}, m.id {order} LIMIT ?{after} OFFSET ?{}", after + 1)
+    };
+    let ids: Vec<i64> = bind_all(page)
         .bind(limit)
         .bind(position)
         .fetch_all(&ctx.app.db)
@@ -453,18 +474,17 @@ async fn query_inner(ctx: &Context<'_>, args: &Map<String, Value>, cap: i64) -> 
     let mut response = json!({
         "accountId": account_id(ctx.account),
         "queryState": ctx.state().await?,
-        "canCalculateChanges": true,
+        "canCalculateChanges": !collapse,
         "position": position,
         "ids": ids.iter().map(|id| format!("m{id}")).collect::<Vec<_>>(),
     });
     if args.get("calculateTotal").and_then(Value::as_bool).unwrap_or(false) {
         // A plain folder listing in threads counts the threads with a message in the folder:
         // the same number as the general query, read from an index.
-        let plain_folder = collapse && mailbox.is_some() && filter.len() == 1 && filter.contains_key("inMailbox");
-        let total: i64 = if plain_folder {
+        let total: i64 = if collapse && plain_folder && filter.contains_key("inMailbox") {
             sqlx::query_scalar("SELECT COUNT(DISTINCT thread_id) FROM messages WHERE mailbox_id = ? AND account_id = ?").bind(mailbox).bind(owner).fetch_one(&ctx.app.db).await?
         } else {
-            bind_all(format!("SELECT COUNT(*) FROM messages m WHERE {conditions}")).fetch_one(&ctx.app.db).await?
+            bind_all(count_all).fetch_one(&ctx.app.db).await?
         };
         response["total"] = json!(total);
     }
@@ -535,6 +555,10 @@ pub async fn changes(ctx: &mut Context<'_>, args: &Map<String, Value>, kind: &st
 /// `Email/queryChanges`: how a query's result list changed since `sinceQueryState`.
 pub async fn query_changes(ctx: &mut Context<'_>, args: &Map<String, Value>) -> MethodResult {
     let since = since_state(args, "sinceQueryState")?;
+    // Which message stands for a thread can change without that message changing.
+    if args.get("collapseThreads").and_then(Value::as_bool).unwrap_or(false) {
+        return Err(MethodError("cannotCalculateChanges", "a list collapsed into threads has to be fetched again".into()));
+    }
     let set = ctx
         .app
         .store
@@ -812,6 +836,14 @@ async fn build_message(ctx: &Context<'_>, spec: &Map<String, Value>) -> Result<V
 }
 
 /// Reads the single target mailbox out of a `mailboxIds` object.
+/// `mailboxIds` with `#key` references to mailboxes created earlier in the same request resolved.
+fn resolved_mailboxes(ctx: &Context<'_>, value: &Value) -> Value {
+    match value.as_object() {
+        Some(map) => Value::Object(map.iter().map(|(id, on)| (ctx.resolve_id(id), on.clone())).collect()),
+        None => value.clone(),
+    }
+}
+
 fn single_mailbox(value: &Value) -> Option<i64> {
     let map = value.as_object()?;
     let mut selected = map.iter().filter(|(_, v)| v.as_bool() == Some(true));
@@ -892,6 +924,13 @@ pub(super) async fn apply_update(ctx: &Context<'_>, id: &str, patch: &Map<String
             }
         }
     }
+    // Nothing is applied of a change that is refused in part.
+    if let Some(mailbox) = target_mailbox.filter(|target| *target != message.mailbox_id) {
+        let (_, target_rights) = ctx.mailbox(mailbox).await.map_err(|_| set_error("serverFail", "internal error"))?.ok_or_else(|| set_error("notFound", "email or mailbox not found"))?;
+        if !(rights.contains('t') && rights.contains('e') && target_rights.contains('i')) {
+            return Err(forbidden());
+        }
+    }
     if keywords_changed {
         let (flags, custom) = split_keywords(&keywords)?;
         // RFC 4314: the read state needs `s`, any other flag or label needs `w`.
@@ -930,6 +969,8 @@ pub(super) async fn apply_update(ctx: &Context<'_>, id: &str, patch: &Map<String
 
 pub async fn set(ctx: &mut Context<'_>, args: &Map<String, Value>) -> MethodResult {
     let old_state = ctx.state().await?;
+    super::objects::check_state(args, &old_state)?;
+    super::objects::check_size(args)?;
     let (mut created, mut not_created) = (Map::new(), Map::new());
     let (mut updated, mut not_updated) = (Map::new(), Map::new());
     let (mut destroyed, mut not_destroyed) = (Vec::new(), Map::new());
@@ -938,7 +979,7 @@ pub async fn set(ctx: &mut Context<'_>, args: &Map<String, Value>) -> MethodResu
         for (creation_id, spec) in create {
             let result = async {
                 let spec = spec.as_object().ok_or_else(|| set_error("invalidProperties", "expected an object"))?;
-                let mailbox = spec.get("mailboxIds").and_then(single_mailbox).ok_or_else(|| set_error("invalidProperties", "an email must be in exactly one mailbox"))?;
+                let mailbox = spec.get("mailboxIds").map(|ids| resolved_mailboxes(ctx, ids)).as_ref().and_then(single_mailbox).ok_or_else(|| set_error("invalidProperties", "an email must be in exactly one mailbox"))?;
                 let empty = Map::new();
                 let (flags, custom) = split_keywords(spec.get("keywords").and_then(Value::as_object).unwrap_or(&empty))?;
                 let raw = build_message(ctx, spec).await?;
@@ -991,7 +1032,13 @@ pub async fn set(ctx: &mut Context<'_>, args: &Map<String, Value>) -> MethodResu
     if let Some(destroy) = args.get("destroy").and_then(Value::as_array) {
         for id in destroy.iter().filter_map(Value::as_str) {
             let found = match parse_id(id, 'm') {
-                Some(message_id) => ctx.message(message_id).await?,
+                Some(message_id) => match ctx.message(message_id).await {
+                    Ok(found) => found,
+                    Err(_) => {
+                        not_destroyed.insert(id.to_owned(), set_error("serverFail", "internal error"));
+                        continue;
+                    }
+                },
                 None => None,
             };
             let result = match found {
@@ -1007,7 +1054,11 @@ pub async fn set(ctx: &mut Context<'_>, args: &Map<String, Value>) -> MethodResu
                 Err(StoreError::NotFound) => {
                     not_destroyed.insert(id.to_owned(), set_error("notFound", "email not found"));
                 }
-                Err(err) => return Err(err.into()),
+                // What was done before stays reported.
+                Err(err) => {
+                    tracing::error!(error = ?err, "email deletion failed");
+                    not_destroyed.insert(id.to_owned(), set_error("serverFail", "internal error"));
+                }
             }
         }
     }
@@ -1032,8 +1083,9 @@ pub async fn import(ctx: &mut Context<'_>, args: &Map<String, Value>) -> MethodR
     }
     for (creation_id, spec) in emails {
         let result = async {
-            let blob_id = spec["blobId"].as_str().ok_or_else(|| set_error("invalidProperties", "blobId is required"))?;
-            let mailbox = single_mailbox(&spec["mailboxIds"]).ok_or_else(|| set_error("invalidProperties", "an email must be in exactly one mailbox"))?;
+            let blob_id = spec["blobId"].as_str().map(|id| ctx.resolve_id(id)).ok_or_else(|| set_error("invalidProperties", "blobId is required"))?;
+            let blob_id = blob_id.as_str();
+            let mailbox = single_mailbox(&resolved_mailboxes(ctx, &spec["mailboxIds"])).ok_or_else(|| set_error("invalidProperties", "an email must be in exactly one mailbox"))?;
             let empty = Map::new();
             let (flags, custom) = split_keywords(spec.get("keywords").and_then(Value::as_object).unwrap_or(&empty))?;
             // Only the user's own uploads can be imported, never a blob id guessed from elsewhere.

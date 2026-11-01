@@ -41,7 +41,7 @@
       "description": "Odd-numbered Node releases are never LTS.",
       "matchDatasources": ["docker"],
       "matchPackageNames": ["node"],
-      "allowedVersions": "/^[0-9]*[02468][.]/"
+      "allowedVersions": "/^[0-9]*[02468]([.-]|$)/"
     }
   ]
 }

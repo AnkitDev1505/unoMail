@@ -325,6 +325,18 @@ fn tls_required(check: &Option<transport::Check>) -> bool {
     matches!(check, Some(transport::Check::WebPki | transport::Check::Dane(_)))
 }
 
+/// A session that ended before encryption was tried: nothing to tell in a TLS report.
+const NOT_ATTEMPTED: Outcome = Some("");
+/// A server that will not talk to us says nothing about the domain's other servers.
+const SESSION_REFUSED: &str = "refused the session: ";
+
+fn refused_session(err: SendError) -> SendError {
+    match err {
+        SendError::Permanent(message) => SendError::Permanent(format!("{SESSION_REFUSED}{message}")),
+        other => other,
+    }
+}
+
 /// One SMTP session. Also tells whether encryption failed: the server offered STARTTLS, but
 /// it could not be set up. With `try_tls` false, STARTTLS is not attempted at all.
 async fn session(tcp: TcpStream, host: &str, check: Option<transport::Check>, env: &Envelope<'_>, try_tls: bool) -> (Result<String, SendError>, Outcome, bool) {
@@ -332,11 +344,11 @@ async fn session(tcp: TcpStream, host: &str, check: Option<transport::Check>, en
     let required = tls_required(&check);
     let mut plain = Transport::new(tcp);
     if let Err(err) = plain.expect(2, COMMAND_TIMEOUT).await {
-        return (Err(err), None, false);
+        return (Err(refused_session(err)), NOT_ATTEMPTED, false);
     }
     let extensions = match ehlo(&mut plain, env.helo).await {
         Ok(extensions) => extensions,
-        Err(err) => return (Err(err), None, false),
+        Err(err) => return (Err(refused_session(err)), NOT_ATTEMPTED, false),
     };
 
     if !try_tls || !extensions.iter().any(|e| e == "STARTTLS") {
@@ -354,7 +366,7 @@ async fn session(tcp: TcpStream, host: &str, check: Option<transport::Check>, en
         // Anything received before the handshake is unauthenticated plaintext.
         return (Err(temp("unexpected data after STARTTLS reply")), Some("validation-failure"), false);
     }
-    let Ok(name) = ServerName::try_from(host.to_owned()) else { return (Err(temp("invalid TLS server name")), None, false) };
+    let Ok(name) = ServerName::try_from(host.to_owned()) else { return (Err(temp("invalid TLS server name")), Some("validation-failure"), false) };
     let verifier = check.clone().map(transport::Verifier::new);
     let config = match &verifier {
         Some(verifier) => {
@@ -374,7 +386,7 @@ async fn session(tcp: TcpStream, host: &str, check: Option<transport::Check>, en
     let tls = match tokio::time::timeout(CONNECT_TIMEOUT, connector.connect(name, plain.stream)).await {
         Ok(Ok(tls)) => tls,
         Ok(Err(e)) => return (Err(temp(format!("TLS handshake failed: {e}"))), Some(problem().unwrap_or("validation-failure")), true),
-        Err(_) => return (Err(temp("TLS handshake timed out")), None, true),
+        Err(_) => return (Err(temp("TLS handshake timed out")), Some("validation-failure"), true),
     };
     let mut secure = Transport::new(tls);
     let result = match ehlo(&mut secure, env.helo).await {
@@ -416,6 +428,8 @@ async fn authenticate<S: AsyncRead + AsyncWrite + Unpin>(t: &mut Transport<S>, r
     let token = base64::engine::general_purpose::STANDARD.encode(format!("\0{}\0{}", relay.username, relay.password));
     match t.command(&format!("AUTH PLAIN {token}"), 2).await {
         Ok(_) => Ok(()),
+        // A 4xx reply or a lost connection passes.
+        Err(SendError::Temporary(message)) => Err(SendError::Temporary(format!("authentication at the SMTP server failed: {message}"))),
         // Wrong credentials will not fix themselves; report instead of retrying for days.
         Err(err) => Err(SendError::Permanent(format!("authentication at the SMTP server failed: {}", err.message()))),
     }
@@ -655,7 +669,7 @@ pub async fn deliver_with(app: &App, sender: &str, recipient: &Address, raw: &[u
                 }
             };
             let (mut result, outcome, tls_failed) = session(tcp, &host, check.clone(), &env, true).await;
-            if !relayed {
+            if !relayed && outcome != NOT_ATTEMPTED {
                 transport::record(app, &recipient.domain, &applied, &host, &addr.ip().to_string(), outcome).await;
             }
             // Opportunistic TLS (RFC 7435): a server whose encryption cannot be set up gets the
@@ -670,6 +684,8 @@ pub async fn deliver_with(app: &App, sender: &str, recipient: &Address, raw: &[u
             }
             match result {
                 Ok(reply) => return Ok((format!("{host}: {reply}"), env.dsn_passed.load(std::sync::atomic::Ordering::Relaxed))),
+                // The next server may take it; if none does, this is the answer.
+                Err(SendError::Permanent(msg)) if msg.starts_with(SESSION_REFUSED) => last_error = SendError::Permanent(format!("{host}: {msg}")),
                 Err(SendError::Permanent(msg)) => return Err(SendError::Permanent(format!("{host}: {msg}"))),
                 Err(SendError::Temporary(msg)) if env.recipient_deferred.load(std::sync::atomic::Ordering::Relaxed) => return Err(temp(format!("{host}: {msg}"))),
                 Err(SendError::Temporary(msg)) => last_error = temp(format!("{host}: {msg}")),

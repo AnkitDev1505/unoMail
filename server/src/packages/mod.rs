@@ -93,7 +93,9 @@ impl Installed {
         let stored: Value = serde_json::from_str(&self.admin_settings).unwrap_or(json!({}));
         for setting in manifest["settings"].as_array().into_iter().flatten().filter(|s| s["type"] == "host") {
             let key = setting["key"].as_str().unwrap_or_default();
-            let host = stored.get(key).or_else(|| setting.get("default")).and_then(Value::as_str).filter(|h| manifest::valid_host(h));
+            // Only what the administrator saved: the manifest's default merely fills in the form,
+            // or an update could add a host without any new permission to approve.
+            let host = stored.get(key).and_then(Value::as_str).filter(|h| manifest::valid_host(h));
             if let Some(host) = host {
                 let permission = format!("network:{host}");
                 if !out.contains(&permission) {
@@ -259,7 +261,9 @@ pub async fn confirm(state: &AppState, token: &str, by: &str) -> Result<Installe
             .bind(by)
             .execute(&state.db)
             .await,
-        Some(_) => sqlx::query("UPDATE packages SET kind = ?, source_url = ?, git_ref = ?, git_commit = ?, manifest = ?, installed_at = ?, installed_by = ? WHERE id = ?")
+        // A theme that turned into a plug-in runs code now: it waits like any new plug-in.
+        Some(_) => sqlx::query("UPDATE packages SET enabled = CASE WHEN kind = ? THEN enabled ELSE 0 END, kind = ?, source_url = ?, git_ref = ?, git_commit = ?, manifest = ?, installed_at = ?, installed_by = ? WHERE id = ?")
+            .bind(kind)
             .bind(kind)
             .bind(&preview.url)
             .bind(&preview.git_ref)

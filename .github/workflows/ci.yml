@@ -14,10 +14,11 @@ on:
 permissions:
   contents: read
 
-# A newer push to the same PR makes the running checks moot. Runs on main always finish:
-# a release of that commit relies on their result.
+# A newer push to the same PR makes the running checks moot. Each commit on main has a run of
+# its own, because a release of that commit relies on its result; in one shared group a run
+# still waiting would be replaced by the next.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
@@ -45,6 +46,9 @@ jobs:
             server:
               - 'server/**'
               - '.github/workflows/ci.yml'
+              # Server tests read these.
+              - 'docs/examples/**'
+              - 'web/src/admin/serverTexts.ts'
             web:
               - 'web/**'
               - '.github/workflows/ci.yml'

@@ -188,12 +188,17 @@ export interface Placement {
 export function layoutDay(events: Pick<Occurrence, 'start' | 'end'>[], day: Date): (Placement | null)[] {
   const from = startOfDay(day).getTime();
   const to = addDays(startOfDay(day), 1).getTime();
-  const minutes = (to - from) / 60_000;
+  // The grid shows 24 hours of the clock, also on the days clocks change.
+  const minutes = 24 * 60;
+  const clock = (at: number) => {
+    const date = new Date(at);
+    return date.getHours() * 60 + date.getMinutes() + date.getSeconds() / 60;
+  };
   const placed: (Placement | null)[] = events.map((event) => {
     const [start, end] = [event.start * 1000, event.end * 1000];
     if (start >= to || (end <= from && end !== start) || (end === start && start < from)) return null;
-    const top = Math.max(0, (start - from) / 60_000);
-    const bottom = Math.min(minutes, (end - from) / 60_000);
+    const top = start <= from ? 0 : clock(start);
+    const bottom = end >= to ? minutes : Math.max(top, clock(end));
     // Short and zero-length events still need room for a line of text.
     return { top: Math.min(top, minutes - 20), height: Math.max(20, bottom - top), column: 0, columns: 1 };
   });
@@ -251,6 +256,13 @@ export function describeRule(rule: string): { repeat: Repeat; until: string } {
   const match = (Object.keys(RULES) as (keyof typeof RULES)[]).find((key) => RULES[key] === rest);
   const stamp = untilPart?.slice(6).match(/^(\d{4})(\d{2})(\d{2})/);
   if (!match || (untilPart && !stamp)) return { repeat: 'custom', until: '' };
+  // A moment in UTC is shown as the day it falls on by the user's clock.
+  const moment = untilPart?.slice(6).match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/);
+  if (moment) {
+    const at = new Date(Date.UTC(+moment[1], +moment[2] - 1, +moment[3], +moment[4], +moment[5], +moment[6]));
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return { repeat: match, until: `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}` };
+  }
   return { repeat: match, until: stamp ? `${stamp[1]}-${stamp[2]}-${stamp[3]}` : '' };
 }
 
@@ -259,9 +271,11 @@ export function buildRule(repeat: Repeat, until: string, allDay: boolean, custom
   if (repeat === 'none') return '';
   if (repeat === 'custom') return custom;
   const day = until.replaceAll('-', '');
-  // The form of UNTIL has to match the start: a date for all-day events, UTC otherwise.
-  const end = /^\d{8}$/.test(day) ? `;UNTIL=${allDay ? day : `${day}T235959Z`}` : '';
-  return RULES[repeat] + end;
+  if (!/^\d{8}$/.test(day)) return RULES[repeat];
+  if (allDay) return `${RULES[repeat]};UNTIL=${day}`;
+  // The form of UNTIL has to match the start: UTC here, for the end of that day on the user's clock.
+  const end = new Date(Number(day.slice(0, 4)), Number(day.slice(4, 6)) - 1, Number(day.slice(6, 8)), 23, 59, 59);
+  return `${RULES[repeat]};UNTIL=${end.toISOString().replace(/[-:]|\.\d{3}/g, '')}`;
 }
 
 // --- Text ------------------------------------------------------------------------------------

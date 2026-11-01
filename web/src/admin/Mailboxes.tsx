@@ -5,7 +5,7 @@ import Edit from '@mui/icons-material/Edit';
 import MoveToInbox from '@mui/icons-material/MoveToInbox';
 import { Alert, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, FormControlLabel, IconButton, MenuItem, Stack, Switch, TableBody, TableCell, TableHead, TableRow, TextField, Tooltip, Typography } from '@mui/material';
 import { useEffect, useState } from 'react';
-import { del, formatBytes, get, patch, post } from '../lib/api';
+import { del, formatBytes, get, patch, post, errorText } from '../lib/api';
 import { useAuth } from '../app';
 import { ConfirmDialog, DialogButtons, PageHeader, routeBy, ScrollTable, StatusChip, UsageBar, useAction, useFormAction, useLoad, validators } from './common';
 
@@ -219,7 +219,7 @@ function TwoStepStatus({ id }: { id: number }) {
       setStatus({ ...status, enabled: false, totp: false, passkeys: 0, app_passwords: 0, sso_linked: false });
       const linkRemoved = status.sso_linked ? ` ${t('The single sign-on link was removed; the next identity to sign in with this address is linked.')}` : '';
       setDone(t('2-step verification was reset and app passwords were revoked; the owner signs in with the password alone and can set it up again.') + linkRemoved);
-    });
+    }, (err) => setDone(errorText(err, t('The action failed'))));
   return (
     <Alert severity={status.enabled ? 'info' : 'warning'} action={(status.enabled || status.sso_linked) && <Button color="inherit" size="small" onClick={reset}>{t('Reset')}</Button>}>
       {done || (status.enabled ? t('2-step verification is on ({{methods}}).', { methods: [status.totp && t('authenticator app'), status.passkeys > 0 && t('{{count}} passkeys', { count: status.passkeys })].filter(Boolean).join(', ') }) : t('2-step verification is off.'))}
@@ -270,9 +270,11 @@ export function Mailboxes() {
     const quota_bytes = Number(form.quota_mb) * MB;
     const body: Record<string, unknown> = editing
       ? {
-          display_name: form.display_name, quota_bytes, enabled: form.enabled, imap_enabled: form.imap_enabled, pop3_enabled: form.pop3_enabled,
-          smtp_enabled: form.smtp_enabled, outbound_blocked: form.outbound_blocked, send_only: form.send_only,
-          ...Object.fromEntries(LIMIT_FIELDS.map((field) => [field, limitValue(field, form.limits[field])])), ...(form.password ? { password: form.password } : {}), ...(isSuper ? { role: form.role } : {}),
+          display_name: form.display_name, ...(isSuper || form.id !== account?.id ? { quota_bytes } : {}), enabled: form.enabled, imap_enabled: form.imap_enabled, pop3_enabled: form.pop3_enabled,
+          smtp_enabled: form.smtp_enabled, send_only: form.send_only,
+          // Limits on one's own account are for someone above: the server refuses them from others.
+          ...(isSuper || form.id !== account?.id ? { outbound_blocked: form.outbound_blocked, ...Object.fromEntries(LIMIT_FIELDS.map((field) => [field, limitValue(field, form.limits[field])])) } : {}),
+          ...(form.password ? { password: form.password } : {}), ...(isSuper ? { role: form.role } : {}),
         }
       : { email: form.email.trim(), password: form.password, display_name: form.display_name, quota_bytes, ...(isSuper ? { role: form.role } : {}) };
     const ok = await saving.run(() => (editing ? patch(`/api/accounts/${form.id}`, body) : post('/api/accounts', body)));

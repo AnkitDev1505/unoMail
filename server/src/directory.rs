@@ -207,7 +207,9 @@ pub async fn bootstrap_admin(app: &App) -> anyhow::Result<()> {
     let exists: Option<i64> =
         sqlx::query_scalar("SELECT id FROM domains WHERE name = ?").bind(&address.domain).fetch_optional(&app.db).await?;
     if exists.is_none() {
-        create_domain(&app.db, &address.domain).await.map_err(|e| anyhow::anyhow!("cannot create domain: {e}"))?;
+        let id = create_domain(&app.db, &address.domain).await.map_err(|e| anyhow::anyhow!("cannot create domain: {e}"))?;
+        // Like every other domain, it signs its mail from the start.
+        crate::security::dkim::create_key(&app.db, &app.secrets, id, &crate::security::dkim::default_selector(), crate::security::dkim::Algorithm::Rsa).await?;
     }
     let generated = app.cfg.admin_password.is_none();
     let password = app.cfg.admin_password.clone().unwrap_or_else(random_token);

@@ -31,9 +31,9 @@ fn release_time(spec: &Value) -> Result<Option<i64>, Value> {
     let parameters = &spec["envelope"]["mailFrom"]["parameters"];
     let hold_for = match &parameters["HOLDFOR"] {
         Value::Null => None,
-        Value::Number(n) => n.as_i64(),
-        Value::String(s) => s.trim().parse::<i64>().ok(),
-        _ => None,
+        Value::Number(n) => Some(n.as_i64().ok_or_else(|| set_error("invalidProperties", "HOLDFOR must be a whole number"))?),
+        Value::String(s) => Some(s.trim().parse::<i64>().map_err(|_| set_error("invalidProperties", "HOLDFOR must be a whole number"))?),
+        _ => return Err(set_error("invalidProperties", "HOLDFOR must be a whole number")),
     };
     let at = match (hold_for, parameters["HOLDUNTIL"].as_str()) {
         (Some(seconds), _) if (0..=MAX_DELAY).contains(&seconds) => now() + seconds,
@@ -125,7 +125,12 @@ pub async fn set(ctx: &mut Context<'_>, args: &Map<String, Value>) -> MethodResu
                 not_updated.insert(id.clone(), set_error("notFound", "no such submission"));
             }
             (Some((message_id, status, on_success)), Some("canceled")) if status == "pending" => {
-                sqlx::query("UPDATE email_submissions SET undo_status = 'canceled' WHERE id = ? AND undo_status = 'pending'").bind(parse_id(&ctx.resolve_id(id), 's')).execute(&ctx.app.db).await?;
+                let canceled = sqlx::query("UPDATE email_submissions SET undo_status = 'canceled' WHERE id = ? AND undo_status = 'pending'").bind(parse_id(&ctx.resolve_id(id), 's')).execute(&ctx.app.db).await?;
+                // Its time came between looking and asking: it has gone.
+                if canceled.rows_affected() == 0 {
+                    not_updated.insert(id.clone(), set_error("cannotUnsend", "the message has been sent already"));
+                    continue;
+                }
                 set_scheduled(ctx, message_id, false).await;
                 // Already shown as sent: back to Drafts.
                 if on_success.contains("\"applied\"")
@@ -316,7 +321,7 @@ pub async fn release_due(app: &AppState) {
 async fn tell_owner(app: &App, account: &Account, reason: &str) {
     let Ok(Some(inbox)) = app.store.mailbox_by_role(account.id, "inbox").await else { return };
     let text = format!(
-        "From: Mail Delivery System <MAILER-DAEMON@{host}>\r\nTo: <{to}>\r\nSubject: A scheduled message was not sent\r\nDate: {date}\r\nMessage-ID: <{id}@{host}>\r\nAuto-Submitted: auto-generated\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nA message you scheduled could not be sent: {reason}\r\nIt is still in your Drafts folder.\r\n",
+        "From: Mail Delivery System <MAILER-DAEMON@{host}>\r\nTo: <{to}>\r\nSubject: A scheduled message was not sent\r\nDate: {date}\r\nMessage-ID: <{id}@{host}>\r\nAuto-Submitted: auto-generated\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nA message you scheduled could not be sent: {reason}\r\nYou will find it in your Drafts or Sent folder.\r\n",
         host = app.cfg.hostname,
         to = account.email,
         date = crate::smtp::delivery::rfc2822_now(),

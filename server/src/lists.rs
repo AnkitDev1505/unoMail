@@ -172,11 +172,11 @@ async fn send(app: &App, envelope_sender: &str, recipient: &str, raw: &[u8]) -> 
 /// A message from the list itself (confirmations, notices), signed for its domain.
 async fn notice(app: &App, list: &List, recipient: &str, subject: &str, text: &str) {
     let raw = format!(
-        "From: \"{name}\" <{from}>\r\nTo: <{recipient}>\r\nSubject: {subject}\r\nDate: {date}\r\nMessage-ID: <{id}@{domain}>\r\nAuto-Submitted: auto-replied\r\n\
-         List-Id: \"{name}\" <{list_id}>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n{text}\r\n",
-        name = sanitize_line(&list.name).replace('"', ""),
+        "From: {name} <{from}>\r\nTo: <{recipient}>\r\nSubject: {subject}\r\nDate: {date}\r\nMessage-ID: <{id}@{domain}>\r\nAuto-Submitted: auto-replied\r\n\
+         List-Id: {name} <{list_id}>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n{text}\r\n",
+        name = crate::util::encode_phrase(&list.name),
         from = list.special("request"),
-        subject = sanitize_line(subject),
+        subject = crate::util::encode_header_text(&sanitize_line(subject)),
         date = rfc2822_now(),
         id = random_token(),
         domain = list.domain(),
@@ -275,7 +275,7 @@ async fn distribute(app: &App, list: &List, raw: &[u8], author_verified: bool) -
     let prefix = list.subject_prefix.trim();
     if !prefix.is_empty() && !subject.contains(prefix) {
         copy = without_headers(&copy, &["Subject"]);
-        extra.push_str(&format!("Subject: {prefix} {}\r\n", sanitize_line(&subject)));
+        extra.push_str(&format!("Subject: {}\r\n", crate::util::encode_header_text(&sanitize_line(&format!("{prefix} {subject}")))));
     }
     let author_domain = author.1.rsplit_once('@').map(|(_, d)| d.to_ascii_lowercase()).unwrap_or_default();
     let ours = author_domain == list.domain() || delivery::is_local_domain(app, &author_domain).await.unwrap_or(false);
@@ -284,7 +284,7 @@ async fn distribute(app: &App, list: &List, raw: &[u8], author_verified: bool) -
     if !author_verified || (!ours && strict_dmarc(app, &author_domain).await) {
         copy = without_headers(&copy, &["From", "Reply-To", "DKIM-Signature"]);
         let display = if author.0.is_empty() { author.1.clone() } else { author.0.clone() };
-        extra.push_str(&format!("From: \"{} via {}\" <{}>\r\n", sanitize_line(&display).replace('"', ""), sanitize_line(&list.name).replace('"', ""), list.address));
+        extra.push_str(&format!("From: {} <{}>\r\n", crate::util::encode_phrase(&format!("{display} via {}", list.name)), list.address));
         let address = crate::util::sanitize_line(&author.1).replace(['<', '>'], "");
         extra.push_str(&format!("X-Original-From: {address}\r\n"));
         if !list.reply_to_list {
@@ -373,12 +373,13 @@ pub async fn moderate(app: &App, token: &str, approve: bool) -> anyhow::Result<O
     let row: Option<(i64, i64, Option<String>, String)> = sqlx::query_as("SELECT id, list_id, blob_hash, subject FROM list_pending WHERE token = ? AND kind = 'post'").bind(token).fetch_optional(&app.db).await?;
     let Some((id, list_id, hash, subject)) = row else { return Ok(None) };
     let list = load(app, list_id).await?.ok_or_else(|| anyhow::anyhow!("the list no longer exists"))?;
-    sqlx::query("DELETE FROM list_pending WHERE id = ?").bind(id).execute(&app.db).await?;
     if approve && let Some(hash) = hash {
         let raw = app.store.read_blob(&hash).await?;
         // Whether the author was authenticated is not kept with a held post.
         distribute(app, &list, &raw, false).await?;
     }
+    // Only now: if sending failed, the moderator can try again.
+    sqlx::query("DELETE FROM list_pending WHERE id = ?").bind(id).execute(&app.db).await?;
     Ok(Some(format!("{} \u{201c}{}\u{201d} ({})", if approve { "Sent" } else { "Discarded" }, subject, list.address)))
 }
 
@@ -446,6 +447,12 @@ fn author(raw: &[u8], envelope: &str) -> String {
 pub async fn receive(app: &App, list_id: i64, role: Role, sender: Sender<'_>, raw: &[u8], junk: bool) -> anyhow::Result<()> {
     let envelope_sender = sender.envelope;
     let Some(list) = load(app, list_id).await? else { return Ok(()) };
+    // Spam is not passed on or answered. Posts are held for a moderator instead.
+    if junk && matches!(role, Role::Owner | Role::Request) {
+        return Ok(());
+    }
+    // Who a notice may be sent to: anyone can write a third party's address into From.
+    let answerable = |from: &str| sender.author_verified || (sender.envelope_verified && from.eq_ignore_ascii_case(sender.envelope));
     match role {
         Role::Post => {
             // Our own copies coming back (through a member's forward) end here.
@@ -474,7 +481,7 @@ pub async fn receive(app: &App, list_id: i64, role: Role, sender: Sender<'_>, ra
                 "members" => Err("the sender is not a member"),
                 _ if moderator => Ok(()),
                 "announce" => {
-                    if !envelope_sender.is_empty() {
+                    if !envelope_sender.is_empty() && answerable(&from) {
                         notice(app, &list, &from, &format!("Your message to {} was not sent", list.address), &format!("Only the owners of {} can post to it.\n", list.address)).await;
                     }
                     return Ok(());
@@ -523,6 +530,10 @@ pub async fn receive(app: &App, list_id: i64, role: Role, sender: Sender<'_>, ra
             if envelope_sender.is_empty() || header_value(raw, "Auto-Submitted").is_some_and(|v| !v.eq_ignore_ascii_case("no")) {
                 return Ok(());
             }
+            // Fall back on the verified envelope; with neither, nobody can be answered safely.
+            let from = if answerable(&from) { from } else if sender.envelope_verified { envelope_sender.to_ascii_lowercase() } else { return Ok(()) };
+            // One open request per address and kind: a new one replaces the last.
+            sqlx::query("DELETE FROM list_pending WHERE list_id = ? AND email = ? AND kind IN ('subscribe', 'unsubscribe')").bind(list.id).bind(&from).execute(&app.db).await?;
             let base = app.cfg.public_url();
             match command(raw).as_str() {
                 "subscribe" | "join" if list.subscription == "open" => {

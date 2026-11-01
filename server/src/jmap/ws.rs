@@ -118,7 +118,7 @@ async fn session(state: AppState, user: JmapUser, mut socket: WebSocket) {
             change = changes.recv(), if push => {
                 let Some(account) = user.auth.account(&state).await else { return };
                 match change {
-                    Ok(change) if change.account_id != account.id => continue,
+                    Ok(change) if change.account_id != account.id && !crate::sharing::mailbox(&state.db, &account, change.mailbox_id).await.ok().flatten().is_some_and(|(_, rights)| rights.contains('r')) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                     _ => {}
                 }

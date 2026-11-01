@@ -10,6 +10,8 @@ import { useEffect, useRef, useState } from 'react';
 import { formatBytes, errorText } from '../lib/api';
 import { previewScale, readPreview } from './previewLimits';
 import type { PDFDocumentLoadingTask, RenderTask } from 'pdfjs-dist';
+import { attachmentRisk } from './risk';
+import { guardedDownload, useRiskConfirm } from './RiskConfirm';
 
 import { t } from '../i18n';
 export interface PreviewFile {
@@ -118,6 +120,7 @@ function PdfPages({ data }: { data: Uint8Array }) {
 /** A dialog showing the content of one attachment. */
 export function AttachmentPreview({ file, onClose }: { file: PreviewFile; onClose: () => void }) {
   const kind = previewKind(file);
+  const [ask, dialog] = useRiskConfirm();
   const [content, setContent] = useState<{ text?: string; truncated?: boolean; imageUrl?: string; pdf?: Uint8Array; size: number } | null>(null);
   const [error, setError] = useState('');
 
@@ -181,7 +184,20 @@ export function AttachmentPreview({ file, onClose }: { file: PreviewFile; onClos
         {content?.pdf && <PdfPages data={content.pdf} />}
       </DialogContent>
       <DialogActions>
-        <Button component="a" href={file.url} download={file.name} startIcon={<Download />}>
+        {dialog}
+        <Button
+          component="a"
+          href={file.url}
+          download={file.name}
+          startIcon={<Download />}
+          onClick={(event: React.MouseEvent) => {
+            // Previewing is safe whatever the file claims; saving it is not.
+            if (attachmentRisk(file.name)) {
+              event.preventDefault();
+              void guardedDownload(ask, file.name, file.url);
+            }
+          }}
+        >
           {t('Download')}
         </Button>
         <Button onClick={onClose}>{t('Close')}</Button>

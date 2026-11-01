@@ -18,7 +18,7 @@ import { Invitation } from '../calendar/Invitation';
 import { emit, type PluginMessage, usePlugins } from '../lib/plugins';
 import { updatePrefs, usePrefs } from '../lib/prefs';
 import { imageProxyUrl } from './extra';
-import { answerReceipt, type EmailFull, formatAddress, labelsOf, normalizeLabel } from './jmapClient';
+import { answerReceipt, type EmailFull, formatAddress, isFile, labelsOf, normalizeLabel } from './jmapClient';
 import { SmimeBadges } from './Smime';
 import { AiAssistButtons, AiAssistResults, AiModelsProvider, useAiAssist } from './AiAssist';
 import { SummaryCards } from './SummaryCards';
@@ -45,13 +45,21 @@ export type ReaderAction = 'reply' | 'replyAll' | 'forward';
 /** Bodies of messages decrypted in this session, so replies can quote them. */
 const decryptedBodies = new Map<string, string>();
 
+/** Receipts answered in this session: the copy of the conversation kept for reopening it does not show that. */
+const answeredReceipts = new Set<string>();
+
+export const isDecrypted = (email: EmailFull) => decryptedBodies.has(email.id);
+
 function rawHtml(email: EmailFull): string {
   const decrypted = decryptedBodies.get(email.id);
   if (decrypted !== undefined) return decrypted;
-  const htmlPart = email.htmlBody[0];
-  const textPart = email.textBody[0];
-  const html = htmlPart && email.bodyValues[htmlPart.partId] && htmlPart.type === 'text/html' ? email.bodyValues[htmlPart.partId].value : null;
-  return html ?? textToHtml(textPart ? (email.bodyValues[textPart.partId]?.value ?? '') : '');
+  // A body can come in several parts, with attachments between them.
+  const shown = (parts: typeof email.htmlBody) =>
+    parts
+      .filter((part) => email.bodyValues[part.partId])
+      .map((part) => (part.type === 'text/html' ? email.bodyValues[part.partId].value : textToHtml(email.bodyValues[part.partId].value)))
+      .join('');
+  return shown(email.htmlBody) || shown(email.textBody);
 }
 
 /** Sanitized HTML of a message, with inline (cid:) images resolved to downloadable blobs. */
@@ -180,7 +188,7 @@ function MessageBody({ email, accountId, ownEmail }: { email: EmailFull; account
   useEffect(() => {
     let cancelled = false;
     const created: string[] = [];
-    const inline = email.attachments.filter((a) => a.cid && a.type.startsWith('image/'));
+    const inline = email.attachments.filter((a) => !isFile(a));
     Promise.all(
       inline.map(async (part) => {
         const response = await fetch(downloadUrl(accountId, part.blobId, part.name ?? 'image'), { credentials: 'same-origin' });
@@ -359,7 +367,7 @@ function MessageBody({ email, accountId, ownEmail }: { email: EmailFull; account
 
 function pluginMessage(email: EmailFull, html: string, accountId: string): PluginMessage {
   const attachments = email.attachments
-    .filter((a) => !a.cid)
+    .filter(isFile)
     .map((a) => ({ id: a.blobId, name: a.name ?? 'attachment', type: a.type, size: a.size, url: downloadUrl(accountId, a.blobId, a.name ?? 'attachment') }));
   return { id: email.id, subject: email.subject, from: email.from ?? [], to: email.to ?? [], receivedAt: email.receivedAt, html, attachments };
 }
@@ -369,7 +377,7 @@ function Message({ email, accountId, ownEmail, inboxId, expanded, collapsible, o
   const plugins = usePlugins();
   const encrypted = encryptedSource(email) !== null;
   // The parts of an encrypted message are ciphertext; its real attachments appear once decrypted.
-  const files = encrypted ? [] : email.attachments.filter((a) => !a.cid);
+  const files = encrypted ? [] : email.attachments.filter(isFile);
   // An invitation usually comes twice in a message (inline and attached): explain it once.
   const invite = files.find((a) => isCalendarFile({ name: a.name ?? '', type: a.type, url: '' }));
   const [preview, setPreview] = useState<PreviewFile | null>(null);
@@ -512,8 +520,9 @@ function ReceiptRequest({ emails, ownEmail }: { emails: EmailFull[]; ownEmail: s
   const policy = prefs.receipts ?? 'ask';
   const [answered, setAnswered] = useState<Record<string, boolean>>({});
   const [error, setError] = useState('');
-  const pending = emails.find((e) => e.receiptRequestedBy && !e.keywords.$mdnsent && !answered[e.id] && !(e.from ?? []).some((a) => a.email.toLowerCase() === ownEmail.toLowerCase()));
+  const pending = emails.find((e) => e.receiptRequestedBy && !e.keywords.$mdnsent && !answered[e.id] && !answeredReceipts.has(e.id) && !(e.from ?? []).some((a) => a.email.toLowerCase() === ownEmail.toLowerCase()));
   const answer = useCallback(async (emailId: string, send: boolean, automatic = false) => {
+    answeredReceipts.add(emailId);
     setAnswered((state) => ({ ...state, [emailId]: true }));
     try {
       await answerReceipt(emailId, send, automatic);

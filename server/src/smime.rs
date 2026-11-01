@@ -350,11 +350,51 @@ fn ber_element(input: &[u8], depth: usize, out: &mut Vec<u8>) -> Option<(bool, u
         der_length(joined.len(), out);
         out.extend_from_slice(&joined);
     } else {
+        let content = if first == 0x30 { join_encrypted_content(&content).unwrap_or(content) } else { content };
         out.extend_from_slice(tag);
         der_length(content.len(), out);
         out.extend_from_slice(&content);
     }
     Some((false, pos))
+}
+
+/// EncryptedContentInfo (an OID, an algorithm and an implicit `[0]`): writers that stream send
+/// the `[0]` as chunks of OCTET STRINGs, where DER has one primitive value. The explicit `[0]`
+/// of signed content has no algorithm before it, so it is not mistaken for this.
+fn join_encrypted_content(content: &[u8]) -> Option<Vec<u8>> {
+    if *content.first()? != 0x06 {
+        return None;
+    }
+    let (header, length) = der_header(content)?;
+    let algorithm = header + length;
+    if *content.get(algorithm)? != 0x30 {
+        return None;
+    }
+    let (header, length) = der_header(&content[algorithm..])?;
+    let encrypted = algorithm + header + length;
+    if *content.get(encrypted)? != 0xA0 {
+        return None;
+    }
+    let (header, length) = der_header(&content[encrypted..])?;
+    let body = content.get(encrypted + header..encrypted + header + length)?;
+    if encrypted + header + length != content.len() {
+        return None;
+    }
+    let mut joined = Vec::new();
+    let mut inner = 0;
+    while inner < body.len() {
+        if body[inner] != 0x04 {
+            return None;
+        }
+        let (header, length) = der_header(&body[inner..])?;
+        joined.extend_from_slice(body.get(inner + header..inner + header + length)?);
+        inner += header + length;
+    }
+    let mut out = content[..encrypted].to_vec();
+    out.push(0x80);
+    der_length(joined.len(), &mut out);
+    out.extend_from_slice(&joined);
+    Some(out)
 }
 
 /// (header size, content length) of an element written by `ber_element`.
@@ -398,28 +438,46 @@ fn param<'a>(params: &'a [(String, String)], name: &str) -> Option<&'a str> {
 fn split_signed(raw: &[u8], boundary: &str) -> Option<(Vec<u8>, Vec<u8>)> {
     let body = &raw[find_header_end(raw).min(raw.len())..];
     let delimiter = format!("--{boundary}");
-    let first = find(body, delimiter.as_bytes())?;
+    let first = find_delimiter(body, delimiter.as_bytes())?;
     let start = first + delimiter.len();
     let start = start + if body[start..].starts_with(b"\r\n") { 2 } else if body[start..].starts_with(b"\n") { 1 } else { 0 };
     let next = format!("\r\n--{boundary}");
-    let (end, after) = match find(&body[start..], next.as_bytes()) {
+    let (end, after) = match find_delimiter(&body[start..], next.as_bytes()) {
         Some(pos) => (start + pos, start + pos + next.len()),
         None => {
             let lf = format!("\n--{boundary}");
-            let pos = find(&body[start..], lf.as_bytes())?;
+            let pos = find_delimiter(&body[start..], lf.as_bytes())?;
             (start + pos, start + pos + lf.len())
         }
     };
     // Signatures cover the entity with CRLF line breaks (RFC 8551 section 3.1.1).
     let signed = canonical(&body[start..end]);
     let rest = &body[after..];
-    let part_end = find(rest, delimiter.as_bytes()).unwrap_or(rest.len());
+    let part_end = find_delimiter(rest, delimiter.as_bytes()).unwrap_or(rest.len());
+    // Exactly two parts: anything added after the signature would be shown as if it were signed.
+    let tail = &rest[part_end..];
+    if !tail.is_empty() && !tail.starts_with(format!("{delimiter}--").as_bytes()) {
+        return None;
+    }
     let part = &rest[..part_end];
     let part = part.strip_prefix(b"\r\n").or_else(|| part.strip_prefix(b"\n")).unwrap_or(part);
     let header_end = find_header_end(part).min(part.len());
     let encoded: Vec<u8> = part[header_end..].iter().copied().filter(|b| !b.is_ascii_whitespace()).collect();
     let signature = STANDARD.decode(encoded).ok()?;
     Some((signed, signature))
+}
+
+/// A boundary delimiter, and not a longer boundary that merely starts the same way.
+fn find_delimiter(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    let mut from = 0;
+    while let Some(at) = find(&haystack[from..], needle) {
+        let found = from + at;
+        match haystack.get(found + needle.len()) {
+            None | Some(b'\r' | b'\n' | b' ' | b'\t' | b'-') => return Some(found),
+            Some(_) => from = found + 1,
+        }
+    }
+    None
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -641,6 +699,11 @@ pub fn decrypt(der: &[u8], identity: &Identity) -> Result<Vec<u8>, String> {
         .find_map(|r| match r {
             RecipientInfo::Ktri(k) => match &k.rid {
                 RecipientIdentifier::IssuerAndSerialNumber(id) if *id == mine => Some(k.clone()),
+                RecipientIdentifier::SubjectKeyIdentifier(ski)
+                    if cert.tbs_certificate.extensions.as_ref().is_some_and(|exts| exts.iter().any(|e| e.extn_id == ObjectIdentifier::new_unwrap("2.5.29.14") && e.extn_value.as_bytes().ends_with(ski.0.as_bytes()))) =>
+                {
+                    Some(k.clone())
+                }
                 _ => None,
             },
             _ => None,
@@ -793,6 +856,24 @@ pub async fn certificates(app: &App, account_id: i64, emails: &[String]) -> sqlx
 
 #[cfg(test)]
 pub mod tests {
+    #[test]
+    fn streamed_encrypted_content_becomes_one_value() {
+        // SEQUENCE { OID, SEQUENCE { OID }, [0] { "a", "b" } }, as streaming writers send it.
+        let ber = [0x30, 0x80, 0x06, 0x01, 0x2a, 0x30, 0x03, 0x06, 0x01, 0x2b, 0xa0, 0x80, 0x04, 0x01, b'a', 0x04, 0x01, b'b', 0, 0, 0, 0];
+        let der = [0x30, 0x0c, 0x06, 0x01, 0x2a, 0x30, 0x03, 0x06, 0x01, 0x2b, 0x80, 0x02, b'a', b'b'];
+        assert_eq!(ber_to_der(&ber).as_deref(), Some(&der[..]));
+        // The explicit [0] of signed content has no algorithm before it, and stays.
+        let signed = [0x30, 0x08, 0x06, 0x01, 0x2a, 0xa0, 0x03, 0x04, 0x01, b'a'];
+        assert_eq!(ber_to_der(&signed).as_deref(), Some(&signed[..]));
+    }
+
+    #[test]
+    fn a_part_added_after_the_signature_ends_the_verification() {
+        let good = b"Content-Type: multipart/signed; boundary=b\r\n\r\n--b\r\nsigned\r\n--b\r\nContent-Type: application/pkcs7-signature\r\n\r\nAAAA\r\n--b--\r\n";
+        assert!(split_signed(good, "b").is_some());
+        let added = b"Content-Type: multipart/signed; boundary=b\r\n\r\n--b\r\nsigned\r\n--b\r\nContent-Type: application/pkcs7-signature\r\n\r\nAAAA\r\n--b\r\nContent-Type: text/plain\r\n\r\npay me\r\n--b--\r\n";
+        assert!(split_signed(added, "b").is_none());
+    }
     use rsa::pkcs8::EncodePrivateKey;
 
     use super::*;

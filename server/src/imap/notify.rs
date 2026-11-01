@@ -75,6 +75,11 @@ impl Notify {
         self.filters.iter().find(|(filter, _)| filter.matches(mailbox)).map(|(_, events)| *events)
     }
 
+    /// Someone watching subscriptions: a mailbox just unsubscribed no longer matches the filter.
+    fn watches_subscriptions(&self) -> bool {
+        self.filters.iter().any(|(filter, events)| matches!(filter, Filter::Subscribed) && events.subscriptions)
+    }
+
     /// Whether the selected mailbox is updated as soon as it changes.
     pub(super) fn live_selected(&self) -> bool {
         self.selected.is_some_and(|e| e.messages || e.flags)
@@ -263,13 +268,15 @@ impl Session {
         let mut known = self.notify.as_mut().map(|n| std::mem::take(&mut n.known)).unwrap_or_default();
         for mailbox in &mailboxes {
             let Some(events) = self.notify.as_ref().and_then(|n| n.events_for(mailbox)) else {
-                known.remove(&mailbox.id);
+                if known.remove(&mailbox.id).is_some_and(|old| old.subscribed && !mailbox.subscribed) && self.notify.as_ref().is_some_and(Notify::watches_subscriptions) {
+                    self.list_line(&mut out, special_use(mailbox.role.as_deref()).trim_start(), &mailbox.name, None);
+                }
                 continue;
             };
             let previous = known.remove(&mailbox.id);
             let flags = format!("{}{}", special_use(mailbox.role.as_deref()), if mailbox.subscribed { " \\Subscribed" } else { "" });
             match &previous {
-                None if events.names => self.list_line(&mut out, flags.trim_start(), &mailbox.name, None),
+                None if events.names || (events.subscriptions && mailbox.subscribed) => self.list_line(&mut out, flags.trim_start(), &mailbox.name, None),
                 Some(old) if old.name != mailbox.name && events.names => self.list_line(&mut out, flags.trim_start(), &mailbox.name, Some(&old.name)),
                 Some(old) if old.subscribed != mailbox.subscribed && events.subscriptions => self.list_line(&mut out, flags.trim_start(), &mailbox.name, None),
                 _ => {}
@@ -341,15 +348,20 @@ impl Session {
 
     /// Waits for the next command, reporting changes while there is none.
     pub(super) async fn await_command(&mut self) -> Result<(), crate::net::ReadError> {
+        // Unlike a client that sends commands, this one may only ever listen.
+        let mut recheck = tokio::time::interval(crate::auth::RECHECK_INTERVAL);
+        recheck.tick().await;
         loop {
             let Some(notify) = &mut self.notify else { return Ok(()) };
             enum Event {
                 Ready(Result<(), crate::net::ReadError>),
                 Store(Option<Change>),
                 Metadata(Option<metadata::Change>),
+                Recheck,
             }
             let event = tokio::select! {
                 ready = self.conn.wait_readable() => Event::Ready(ready),
+                _ = recheck.tick() => Event::Recheck,
                 change = notify.changes.recv() => match change {
                     Ok(change) => Event::Store(Some(change)),
                     Err(RecvError::Lagged(_)) => Event::Store(None),
@@ -362,6 +374,13 @@ impl Session {
             };
             let sent = match event {
                 Event::Ready(ready) => return ready,
+                Event::Recheck => {
+                    if !self.still_signed_in().await {
+                        self.line("* BYE the sign-in is no longer valid").await.map_err(crate::net::ReadError::from)?;
+                        return Err(crate::net::ReadError::Closed);
+                    }
+                    Ok(())
+                }
                 Event::Store(change) => self.notify_change(change).await,
                 Event::Metadata(Some(change)) => self.notify_metadata(change).await,
                 Event::Metadata(None) => Ok(()),

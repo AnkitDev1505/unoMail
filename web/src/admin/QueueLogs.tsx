@@ -113,7 +113,7 @@ const MAX_ROWS = 1000;
  * Log table data with search and a live tail. New entries are pushed by the server over a
  * server-sent event stream; the search filter is applied to streamed entries in the browser.
  */
-function useLogStream<T extends { id: number }>(path: string, kind: string, query: string, needle: string, live: boolean, enabled: boolean) {
+function useLogStream<T extends { id: number }>(path: string, kind: string, query: string, needle: string, live: boolean, enabled: boolean, status = '') {
   const [rows, setRows] = useState<T[]>([]);
   const [error, setError] = useState('');
   const [connected, setConnected] = useState(false);
@@ -141,6 +141,7 @@ function useLogStream<T extends { id: number }>(path: string, kind: string, quer
       const entry = JSON.parse((event as MessageEvent).data) as T;
       const text = JSON.stringify(entry).toLowerCase();
       if (needle && !text.includes(needle.toLowerCase())) return;
+      if (status && (entry as { status?: string }).status !== status) return;
       setRows((current) => (current.some((r) => r.id === entry.id) ? current : [entry, ...current].slice(0, MAX_ROWS)));
     });
     return () => {
@@ -192,7 +193,7 @@ export function Logs() {
 
   const query = `q=${encodeURIComponent(debounced)}${tab === 'delivery' && status ? `&status=${encodeURIComponent(status)}` : ''}`;
   const statusFilter = tab === 'delivery' && status ? status : '';
-  const delivery = useLogStream<DeliveryRow>('/api/logs/delivery', 'delivery', query, statusFilter || debounced, live, tab === 'delivery');
+  const delivery = useLogStream<DeliveryRow>('/api/logs/delivery', 'delivery', query, debounced, live, tab === 'delivery', statusFilter);
   const audit = useLogStream<AuditRow>('/api/logs/audit', 'audit', query, debounced, live, tab === 'audit' && isSuper);
   const system = useLogStream<SystemRow>('/api/logs/system', 'system', query, debounced, live, tab === 'system' && isSuper);
   const smtp = useLogStream<SmtpRow>('/api/logs/smtp', 'smtp', query, debounced, live, tab === 'smtp' && isSuper);

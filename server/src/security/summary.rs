@@ -54,7 +54,7 @@ fn headers(raw: &[u8]) -> Vec<(String, String)> {
 }
 
 /// Removes RFC 5322 comments (parenthesised text) from a header value.
-fn without_comments(value: &str) -> String {
+pub(super) fn without_comments(value: &str) -> String {
     let (mut out, mut depth) = (String::with_capacity(value.len()), 0usize);
     for c in value.chars() {
         match c {

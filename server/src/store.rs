@@ -149,6 +149,13 @@ pub struct Parsed {
     pub sent_date: i64,
 }
 
+/// The mailboxes other accounts share with account `?1`, as a subquery.
+const SHARED_MAILBOXES: &str = "SELECT a.mailbox_id FROM mailbox_acl a JOIN mailboxes b ON b.id = a.mailbox_id JOIN accounts o ON o.id = b.account_id
+     WHERE b.account_id != ?1 AND instr(a.rights, 'r') > 0 AND (a.grantee_id = ?1 OR (a.grantee_id = 0 AND o.domain_id = (SELECT domain_id FROM accounts WHERE id = ?1)))";
+/// Their owners.
+const SHARED_OWNERS: &str = "SELECT b.account_id FROM mailbox_acl a JOIN mailboxes b ON b.id = a.mailbox_id JOIN accounts o ON o.id = b.account_id
+     WHERE b.account_id != ?1 AND instr(a.rights, 'r') > 0 AND (a.grantee_id = ?1 OR (a.grantee_id = 0 AND o.domain_id = (SELECT domain_id FROM accounts WHERE id = ?1)))";
+
 fn clip(s: &str, max: usize) -> String {
     s.chars().filter(|c| !c.is_control()).take(max).collect()
 }
@@ -287,6 +294,11 @@ impl Store {
         .await?;
         for hash in &hashes {
             Self::check_hash(hash)?;
+            // The same content may have arrived again just now.
+            let again: Option<i64> = sqlx::query_scalar("SELECT 1 FROM blobs WHERE hash = ?").bind(hash).fetch_optional(&self.db).await?;
+            if again.is_some() {
+                continue;
+            }
             if let Err(err) = self.blobs.remove(hash).await {
                 tracing::warn!(%err, hash, "failed to remove unreferenced blob");
             }
@@ -382,9 +394,10 @@ impl Store {
             "UPDATE mailboxes SET name = ? || substr(name, ?) WHERE account_id = ? AND substr(name, 1, ?) = ?",
         )
         .bind(new_name)
-        .bind(mailbox.name.len() as i64 + 1)
+        // SQLite's substr counts characters.
+        .bind(mailbox.name.chars().count() as i64 + 1)
         .bind(account_id)
-        .bind(mailbox.name.len() as i64 + 1)
+        .bind(mailbox.name.chars().count() as i64 + 1)
         .bind(format!("{}/", mailbox.name))
         .execute(&mut *tx)
         .await?;
@@ -395,7 +408,7 @@ impl Store {
         )
         .bind(account_id)
         .bind(id)
-        .bind(new_name.len() as i64 + 1)
+        .bind(new_name.chars().count() as i64 + 1)
         .bind(format!("{new_name}/"))
         .execute(&mut *tx)
         .await?;
@@ -638,15 +651,24 @@ impl Store {
     /// Changes to objects of `kind` after state `since`, coalesced per object.
     ///
     /// Returns `None` when the log no longer reaches back to `since` (the client must refetch).
+    ///
+    /// Mailboxes shared with the account are included. Of a message that left them nothing can
+    /// be told apart from its owner's other mail, so a destroyed id may name one never seen here,
+    /// which clients ignore; one moved out of a shared mailbox shows at the next full fetch.
     pub async fn changes_since(&self, account_id: i64, kind: &str, since: i64, max: usize) -> Result<Option<ChangeSet>, StoreError> {
         let floor: i64 = crate::db::get_setting(&self.db, "changes.floor").await?.and_then(|v| v.parse().ok()).unwrap_or(0);
         let current = self.account_state(account_id).await?;
         if since < floor || since > current {
             return Ok(None);
         }
-        let rows: Vec<(i64, i64, Option<i64>, String)> = sqlx::query_as(
-            "SELECT id, object_id, thread_id, change FROM changes WHERE account_id = ? AND kind = ? AND id > ? ORDER BY id",
-        )
+        let rows: Vec<(i64, i64, Option<i64>, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT c.id, c.object_id, c.thread_id, c.change FROM changes c
+              WHERE c.kind = ?2 AND c.id > ?3 AND (c.account_id = ?1 OR (c.account_id IN ({SHARED_OWNERS}) AND CASE
+                    WHEN c.kind = 'mailbox' THEN c.object_id IN ({SHARED_MAILBOXES})
+                    WHEN c.change = 'destroyed' THEN 1
+                    ELSE (SELECT m.mailbox_id FROM messages m WHERE m.id = c.object_id) IN ({SHARED_MAILBOXES}) END))
+              ORDER BY c.id"
+        )))
         .bind(account_id)
         .bind(kind)
         .bind(since)
@@ -790,10 +812,11 @@ impl Store {
 
     /// The account's JMAP state: the id of its latest change-log entry.
     pub async fn account_state(&self, account_id: i64) -> Result<i64, StoreError> {
-        Ok(sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM changes WHERE account_id = ?")
-            .bind(account_id)
-            .fetch_one(&self.db)
-            .await?)
+        let last: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT COALESCE(MAX(id), 0) FROM changes WHERE account_id = ?1 OR account_id IN ({SHARED_OWNERS})"))).bind(account_id).fetch_one(&self.db).await?;
+        // The log is pruned across accounts: a quiet account's state must not fall behind what
+        // the log still reaches, or every sync would start over.
+        let floor: i64 = crate::db::get_setting(&self.db, "changes.floor").await?.and_then(|v| v.parse().ok()).unwrap_or(0);
+        Ok(last.max(floor))
     }
 
     /// Moves a message to another mailbox of the same account, assigning it a new UID.
@@ -870,6 +893,15 @@ impl Store {
         Ok((appended.id, appended.uid))
     }
 
+    /// Notes a change to a mailbox's own properties, for `/changes` and those listening.
+    pub async fn mailbox_changed(&self, account_id: i64, id: i64) -> Result<(), StoreError> {
+        let (_turn, mut tx) = self.begin_write().await?;
+        Self::record(&mut *tx, account_id, "mailbox", id, None, "updated").await?;
+        tx.commit().await?;
+        self.notify(account_id, id);
+        Ok(())
+    }
+
     /// Permanently removes a message and releases its quota.
     pub async fn delete_message(&self, account_id: i64, id: i64) -> Result<(), StoreError> {
         let msg = self.message(account_id, id).await?;
@@ -884,6 +916,8 @@ impl Store {
         Self::record(&mut *tx, account_id, "email", id, Some(msg.thread_id), "destroyed").await?;
         Self::record(&mut *tx, account_id, "mailbox", msg.mailbox_id, None, "updated").await?;
         sqlx::query("DELETE FROM messages WHERE id = ?").bind(id).execute(&mut *tx).await?;
+        // Its id may be used again: nothing may stay waiting to send "this message".
+        sqlx::query("DELETE FROM email_submissions WHERE message_id = ? AND undo_status = 'pending'").bind(id).execute(&mut *tx).await?;
         sqlx::query("UPDATE accounts SET used_bytes = MAX(0, used_bytes - ?) WHERE id = ?")
             .bind(msg.size)
             .bind(account_id)

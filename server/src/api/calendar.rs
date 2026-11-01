@@ -495,6 +495,11 @@ pub async fn invitation_respond(State(state): State<AppState>, session: Session,
     }
     let mut object_id = None;
     match (&stored, status) {
+        // An answer about one occurrence is kept with it; the series is not touched.
+        (Some((calendar, object)), _) if event.prop("RECURRENCE-ID").is_some() => {
+            let merged = ical::merge_occurrences(&object.data, &data).map_err(ApiError::bad)?;
+            object_id = Some(store::put_object(&state.db, calendar, &object.name, &merged).await?.0.id);
+        }
         (Some((calendar, object)), "DECLINED") => {
             store::delete_object(&state.db, calendar, &object.name).await?;
         }

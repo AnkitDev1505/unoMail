@@ -2374,5 +2374,9 @@
   "A setup QR code is not available for this account: it cannot use both IMAP and SMTP, or its address is not plain ASCII.": "Pentru acest cont nu este disponibil un cod QR de configurare: nu poate folosi și IMAP, și SMTP, sau adresa nu este ASCII simplu.",
   "Set up Thunderbird for Android by scanning a code instead of typing the server details. With 2-step verification on, create an app password with mail access above and show its QR code.": "Configurați Thunderbird pentru Android scanând un cod în loc să tastați datele serverului. Cu verificarea în doi pași activă, creați mai sus o parolă de aplicație cu acces la e-mail și afișați codul ei QR.",
   "Set up Thunderbird for Android by scanning a code instead of typing the server details. The code carries your password; an app password with mail access works too.": "Configurați Thunderbird pentru Android scanând un cod în loc să tastați datele serverului. Codul conține parola dvs.; funcționează și o parolă de aplicație cu acces la e-mail.",
-  "Show": "Afișează"
+  "Show": "Afișează",
+  "Finish or close the message you are writing first": "Mai întâi finalizați sau închideți mesajul pe care îl scrieți",
+  "An encrypted message cannot be saved as a draft. Send it, or turn encryption off to keep it.": "Un mesaj criptat nu poate fi salvat ca ciornă. Trimiteți-l sau dezactivați criptarea pentru a-l păstra.",
+  "The server could not be reached. Please try again.": "Serverul nu a putut fi contactat. Încercați din nou.",
+  "The test event failed: {{status}}": "Evenimentul de test a eșuat: {{status}}"
 }

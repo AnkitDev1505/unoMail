@@ -157,6 +157,7 @@ pub async fn karma_of(app: &App, ip: IpAddr) -> i64 {
 pub async fn prune(app: &App) {
     let _ = sqlx::query("DELETE FROM ip_rules WHERE expires_at IS NOT NULL AND expires_at <= ?").bind(now()).execute(&app.db).await;
     let _ = sqlx::query("DELETE FROM ip_karma WHERE last_seen < ?").bind(now() - 30 * 86400).execute(&app.db).await;
+    let _ = sqlx::query("DELETE FROM ip_reputation WHERE checked_at < ?").bind(now() - 30 * 86400).execute(&app.db).await;
     reload(app).await;
 }
 

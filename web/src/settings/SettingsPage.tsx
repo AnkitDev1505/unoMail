@@ -47,8 +47,19 @@ interface Vacation {
   interval_days: number;
 }
 
-const toDateInput = (seconds: number | null) => (seconds ? new Date(seconds * 1000).toISOString().slice(0, 10) : '');
-const fromDateInput = (value: string) => (value ? Math.floor(new Date(`${value}T00:00:00Z`).getTime() / 1000) : null);
+// Days on the user's clock. The last day counts in full: it is stored as the start of the next.
+const toDateInput = (seconds: number | null, lastDay = false) => {
+  if (!seconds) return '';
+  const day = new Date(seconds * 1000);
+  if (lastDay) day.setDate(day.getDate() - 1);
+  return `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`;
+};
+const fromDateInput = (value: string, lastDay = false) => {
+  if (!value) return null;
+  const day = new Date(`${value}T00:00:00`);
+  if (lastDay) day.setDate(day.getDate() + 1);
+  return Math.floor(day.getTime() / 1000);
+};
 
 function VacationCard() {
   const [settings, setSettings] = useState<Vacation | null>(null);
@@ -88,7 +99,7 @@ function VacationCard() {
           <TextField label={t('Reply message')} value={settings.body} onChange={(e) => set({ body: e.target.value })} multiline minRows={4} />
           <Stack direction="row" spacing={2}>
             <TextField label={t('First day')} type="date" value={toDateInput(settings.starts_at)} onChange={(e) => set({ starts_at: fromDateInput(e.target.value) })} slotProps={{ inputLabel: { shrink: true } }} />
-            <TextField label={t('Until')} type="date" value={toDateInput(settings.ends_at)} onChange={(e) => set({ ends_at: fromDateInput(e.target.value) })} slotProps={{ inputLabel: { shrink: true } }} />
+            <TextField label={t('Until')} type="date" value={toDateInput(settings.ends_at, true)} onChange={(e) => set({ ends_at: fromDateInput(e.target.value, true) })} slotProps={{ inputLabel: { shrink: true } }} />
           </Stack>
           <Typography variant="caption" sx={{ color: 'text.secondary' }}>
             {t('Each correspondent gets at most one reply every {{interval_days}} days. Mailing lists and automated messages are never answered.', { interval_days: settings.interval_days })}
@@ -151,8 +162,12 @@ export default function SettingsPage() {
   }
 
   async function revoke() {
-    await del('/api/auth/sessions').catch(() => {});
-    setMessage(t('Other sessions have been signed out.'));
+    try {
+      await del('/api/auth/sessions');
+      setMessage(t('Other sessions have been signed out.'));
+    } catch (err) {
+      setMessage(errorText(err, t('The action failed')));
+    }
     await sessions.reload();
   }
 

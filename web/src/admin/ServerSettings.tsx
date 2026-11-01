@@ -1,7 +1,7 @@
 // Global server configuration: settings that can be changed while the server runs.
 
 import { Alert, Box, Button, Card, CardContent, Chip, FormControlLabel, MenuItem, Stack, Switch, TableBody, TableCell, TableRow, TextField, Typography } from '@mui/material';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { del, get, patch, put } from '../lib/api';
 import { PageHeader, useAction, useLoad, ScrollTable } from './common';
 
@@ -327,12 +327,16 @@ export function ServerSettings() {
   const { run, feedback } = useAction();
   const [drafts, setDrafts] = useState<Record<string, string>>({});
 
-  useEffect(() => setDrafts({}), [data]);
+
   if (error) return <Alert severity="error">{error}</Alert>;
   if (!data) return null;
 
   const save = async (key: string, value: unknown) => {
-    if (await run(() => patch('/api/settings', { [key]: value }), value === null ? t('Reset to default') : t('Setting saved'))) await reload();
+    if (await run(() => patch('/api/settings', { [key]: value }), value === null ? t('Reset to default') : t('Setting saved'))) {
+      // Only this field: what is being typed in the others stays.
+      setDrafts(({ [key]: _saved, ...others }) => others);
+      await reload();
+    }
   };
 
   return (

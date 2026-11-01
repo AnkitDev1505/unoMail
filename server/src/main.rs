@@ -240,8 +240,8 @@ async fn main() -> anyhow::Result<()> {
 
     let router = api::router(app.clone());
     let plain = if cfg.http_redirect { api::redirect_router(app.clone()) } else { router.clone() };
-    tokio::spawn(http::serve(http_listener, plain, None));
-    tokio::spawn(http::serve(https_listener, router, Some(app.tls.server_config(&[b"h2", b"http/1.1"]))));
+    tokio::spawn(http::serve(http_listener, plain, None, app.cfg.trusted_proxies.clone()));
+    tokio::spawn(http::serve(https_listener, router, Some(app.tls.server_config(&[b"h2", b"http/1.1"])), app.cfg.trusted_proxies.clone()));
 
     tracing::info!(hostname = cfg.hostname, "unoMail is ready");
     shutdown_signal().await;

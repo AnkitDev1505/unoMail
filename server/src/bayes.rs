@@ -133,8 +133,9 @@ static TRAINING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Teaches the account's filter that a message is (or is not) spam. A message learned the
 /// other way before is moved over; one learned the same way is left alone.
-pub async fn learn(db: &SqlitePool, account_id: i64, raw: &[u8], spam: bool) -> sqlx::Result<()> {
-    let Some((fingerprint, tokens)) = tokenize(raw) else { return Ok(()) };
+/// Tells whether this was news; a decision repeated counts for nothing.
+pub async fn learn(db: &SqlitePool, account_id: i64, raw: &[u8], spam: bool) -> sqlx::Result<bool> {
+    let Some((fingerprint, tokens)) = tokenize(raw) else { return Ok(false) };
     let _turn = TRAINING.lock().await;
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let previous: Option<i64> = sqlx::query_scalar("SELECT spam FROM bayes_learned WHERE account_id = ? AND fingerprint = ?")
@@ -143,7 +144,7 @@ pub async fn learn(db: &SqlitePool, account_id: i64, raw: &[u8], spam: bool) -> 
         .fetch_optional(&mut *tx)
         .await?;
     let (spam_delta, ham_delta) = match (previous, spam) {
-        (Some(1), true) | (Some(0), false) => return Ok(()),
+        (Some(1), true) | (Some(0), false) => return Ok(false),
         (Some(_), true) => (1, -1),
         (Some(_), false) => (-1, 1),
         (None, true) => (1, 0),
@@ -169,7 +170,8 @@ pub async fn learn(db: &SqlitePool, account_id: i64, raw: &[u8], spam: bool) -> 
         .bind(now())
         .execute(&mut *tx)
         .await?;
-    tx.commit().await
+    tx.commit().await?;
+    Ok(true)
 }
 
 /// How many messages of each kind the account's filter has learned.
@@ -326,13 +328,15 @@ pub async fn judge(app: &App, account_id: i64, author: &str, raw: &[u8]) -> Verd
 pub fn train(app: &crate::app::AppState, account_id: i64, raw: Vec<u8>, spam: bool) {
     let app = app.clone();
     tokio::spawn(async move {
-        if app.rt().personal_spam_filter
-            && let Err(err) = learn(&app.db, account_id, &raw, spam).await
-        {
-            tracing::warn!(error = %err, "personal spam filter training failed");
+        let mut news = true;
+        if app.rt().personal_spam_filter {
+            match learn(&app.db, account_id, &raw, spam).await {
+                Ok(fresh) => news = fresh,
+                Err(err) => tracing::warn!(error = %err, "personal spam filter training failed"),
+            }
         }
-        // The source of the message earns its reputation from the decision too.
-        if app.rt().sender_reputation {
+        // The source of the message earns its reputation from the decision too, once.
+        if news && app.rt().sender_reputation {
             crate::security::filter::learn_from_message(&app, &raw, spam).await;
         }
         crate::security::rspamd::learn(&app, raw, spam).await;

@@ -18,6 +18,7 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(60);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const MAX_LINE: usize = 8 * 1024;
 pub const MAX_SCRIPT: usize = 64 * 1024;
+const MAX_ANONYMOUS_COMMAND: usize = 16 * 1024;
 pub const MAX_SCRIPTS: usize = 20;
 const MAX_ERRORS: u32 = 20;
 
@@ -132,14 +133,18 @@ impl Session {
     async fn read_command(&mut self) -> Result<Result<Vec<Token>, &'static str>, ReadError> {
         let mut tokens = Vec::new();
         let mut line = self.conn.read_line(MAX_LINE).await?;
+        // Each literal is limited, and so is the whole command: it is all held in memory.
+        let mut budget = if self.account.is_some() { MAX_SCRIPT * 2 } else { MAX_ANONYMOUS_COMMAND };
         loop {
+            budget = budget.saturating_sub(line.len() + 2);
             match tokenize_line(&line, &mut tokens) {
                 Ok(None) => return Ok(Ok(tokens)),
                 Ok(Some(length)) => {
                     let limit = if self.account.is_some() { MAX_SCRIPT } else { 1024 };
-                    if length > limit {
+                    if length > limit || length >= budget {
                         return Err(ReadError::TooLong);
                     }
+                    budget -= length;
                     tokens.push(Token::Str(self.conn.read_exact(length).await?));
                     line = self.conn.read_line(MAX_LINE).await?;
                 }
@@ -191,7 +196,10 @@ impl Session {
             match reply {
                 Reply::Ok(text) => self.send(&format!("OK {}\r\n", quoted(&text))).await?,
                 Reply::No(text) => {
-                    self.errors += 1;
+                    // An ordinary NO is an answer; only before sign-in do refusals add up.
+                    if self.account.is_none() {
+                        self.errors += 1;
+                    }
                     // A response code, if any, comes first and unquoted.
                     if text.starts_with('(') {
                         let (code, rest) = text.split_once(") ").unwrap_or((&text, ""));
@@ -377,6 +385,7 @@ impl Session {
             }
             "DELETESCRIPT" => match arg(0).and_then(|name| scripts.iter().find(|s| s.name == name)) {
                 Some(script) if script.active => Reply::No("(ACTIVE) deactivate the script first".into()),
+                Some(script) if !sieve::active_survives_without(&self.app, &scripts, &script.name).await => Reply::No("(ACTIVE) the active script includes this one".into()),
                 Some(script) => {
                     let name = script.name.clone();
                     let _ = sieve::delete(&self.app, account_id, &name).await;
@@ -395,6 +404,9 @@ impl Session {
                 }
                 if !sieve::valid_script_name(&new) {
                     return Ok(Reply::No("script names may contain letters, digits, '.', '-' and '_'".into()));
+                }
+                if !sieve::active_survives_without(&self.app, &scripts, &old).await {
+                    return Ok(Reply::No("(ACTIVE) the active script includes this one".into()));
                 }
                 match sqlx::query("UPDATE sieve_scripts SET name = ? WHERE account_id = ? AND name = ?").bind(&new).bind(account_id).bind(&old).execute(&self.app.db).await {
                     Ok(_) => Reply::Ok("RENAMESCRIPT completed".into()),
@@ -425,7 +437,9 @@ async fn handle(app: AppState, tcp: TcpStream, peer: SocketAddr) {
 pub async fn serve(app: AppState, listener: TcpListener) {
     loop {
         match listener.accept().await {
-            Ok((tcp, peer)) => {
+            Ok((tcp, mut peer)) => {
+                // On a dual-stack socket IPv4 clients appear as ::ffff:a.b.c.d.
+                peer.set_ip(peer.ip().to_canonical());
                 tokio::spawn(handle(app.clone(), tcp, peer));
             }
             Err(err) => {

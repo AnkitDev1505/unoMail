@@ -23,7 +23,6 @@ const EMPTY: Omit<Contact, 'id'> = { name: '', email: '', phone: '', organizatio
 function ContactDialog({ contact, groups, onClose }: { contact: Contact | null; groups: ContactGroup[]; onClose: (saved: boolean) => void }) {
   const [form, setForm] = useState<Omit<Contact, 'id'>>(contact ?? EMPTY);
   // Group id -> ids of its members, loaded once so membership can be edited here.
-  const [members, setMembers] = useState<Record<number, number[]>>({});
   const [selected, setSelected] = useState<number[]>([]);
   const [error, setError] = useState('');
   const set = (changes: Partial<Contact>) => setForm((current) => ({ ...current, ...changes }));
@@ -34,7 +33,6 @@ function ContactDialog({ contact, groups, onClose }: { contact: Contact | null; 
       .then((entries) => {
         if (cancelled) return;
         const loaded = Object.fromEntries(entries);
-        setMembers(loaded);
         if (contact) setSelected(groups.filter((group) => loaded[group.id]?.includes(contact.id)).map((group) => group.id));
       })
       .catch(() => {});
@@ -48,7 +46,8 @@ function ContactDialog({ contact, groups, onClose }: { contact: Contact | null; 
     try {
       const saved = contact ? await put<Contact>(`/api/me/contacts/${contact.id}`, form) : await post<Contact>('/api/me/contacts', form);
       for (const group of groups) {
-        const current = members[group.id] ?? [];
+        // Read now: a list that failed to load must not replace the group with this one contact.
+        const current = await get<number[]>(`/api/me/contact-groups/${group.id}/members`);
         const wanted = selected.includes(group.id);
         if (wanted === current.includes(saved.id)) continue;
         const next = wanted ? [...current, saved.id] : current.filter((id) => id !== saved.id);
@@ -228,7 +227,8 @@ export default function ContactsPage() {
               {currentGroup ? currentGroup.name : t('All contacts')}
             </Typography>
             <TextField label={t('Search contacts')} value={query} onChange={(e) => setQuery(e.target.value)} sx={{ minWidth: 220 }} />
-            {currentGroup && contacts.length > 0 && (
+            {/* While searching, the list is not the whole group. */}
+            {currentGroup && contacts.length > 0 && !query.trim() && (
               <Button startIcon={<Send />} onClick={() => navigate(`/mail/inbox?compose=${encodeURIComponent(contacts.map((c) => c.email).join(', '))}`)}>
                 {t('Write to group')}
               </Button>

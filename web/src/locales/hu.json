@@ -2326,5 +2326,9 @@
   "A setup QR code is not available for this account: it cannot use both IMAP and SMTP, or its address is not plain ASCII.": "Ehhez a fiókhoz nem érhető el beállító QR-kód: nem használhatja egyszerre az IMAP-ot és az SMTP-t, vagy a címe nem tiszta ASCII.",
   "Set up Thunderbird for Android by scanning a code instead of typing the server details. With 2-step verification on, create an app password with mail access above and show its QR code.": "Állítsa be az Androidos Thunderbirdöt egy kód beolvasásával a kiszolgálóadatok begépelése helyett. Bekapcsolt kétlépcsős azonosításnál hozzon létre fent egy levelezési hozzáférésű alkalmazásjelszót, és jelenítse meg a QR-kódját.",
   "Set up Thunderbird for Android by scanning a code instead of typing the server details. The code carries your password; an app password with mail access works too.": "Állítsa be az Androidos Thunderbirdöt egy kód beolvasásával a kiszolgálóadatok begépelése helyett. A kód tartalmazza a jelszavát; levelezési hozzáférésű alkalmazásjelszó is használható.",
-  "Show": "Megjelenítés"
+  "Show": "Megjelenítés",
+  "Finish or close the message you are writing first": "Először fejezze be vagy zárja be az éppen írt üzenetet",
+  "An encrypted message cannot be saved as a draft. Send it, or turn encryption off to keep it.": "A titkosított üzenet nem menthető piszkozatként. Küldje el, vagy kapcsolja ki a titkosítást a megőrzéséhez.",
+  "The server could not be reached. Please try again.": "A kiszolgáló nem érhető el. Próbálja újra.",
+  "The test event failed: {{status}}": "A tesztesemény sikertelen: {{status}}"
 }

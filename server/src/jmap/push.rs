@@ -345,6 +345,10 @@ pub async fn state_change(app: &App, account: i64) -> Option<Value> {
     Some(json!({ "@type": "StateChange", "changed": { id: { "Email": state, "Mailbox": state, "Thread": state } } }))
 }
 
+async fn subscribers(app: &App) -> Vec<i64> {
+    sqlx::query_scalar("SELECT DISTINCT account_id FROM push_subscriptions WHERE verified = 1").fetch_all(&app.db).await.unwrap_or_default()
+}
+
 fn account_id_of(account: i64) -> String {
     format!("a{account}")
 }
@@ -362,7 +366,8 @@ pub async fn run(app: AppState) {
             Ok(change) => {
                 accounts.insert(change.account_id);
             }
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+            // Changes were missed: whoever may be waiting for one hears from us.
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => accounts.extend(subscribers(&app).await),
             Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
         }
         // Gather what else changes meanwhile.
@@ -373,12 +378,16 @@ pub async fn run(app: AppState) {
                 _ = &mut deadline => break,
                 change = changes.recv() => match change {
                     Ok(change) => { accounts.insert(change.account_id); }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => accounts.extend(subscribers(&app).await),
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                 },
             }
         }
         let _ = sqlx::query("DELETE FROM push_subscriptions WHERE expires < ?").bind(now()).execute(&app.db).await;
+        // Whoever a changed mailbox is shared with sees a new state too.
+        for owner in accounts.clone() {
+            accounts.extend(crate::sharing::watchers(&app.db, owner).await.unwrap_or_default());
+        }
         for account in accounts {
             let rows: Vec<Subscription> = sqlx::query_as("SELECT * FROM push_subscriptions WHERE account_id = ? AND verified = 1").bind(account).fetch_all(&app.db).await.unwrap_or_default();
             if rows.is_empty() {

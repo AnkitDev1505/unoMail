@@ -172,10 +172,11 @@ impl Card {
             Card::Purchase(p) => format!("{}\n{}", p.merchant.to_lowercase(), p.order_number),
             // Legs of one booking share its number; the segment and travel day tell them apart.
             Card::Reservation(r) => {
-                let day = if r.segment.is_some() { r.start.as_deref().map(|s| &s[..s.len().min(10)]).unwrap_or_default() } else { "" };
+                let day = if r.segment.is_some() { r.start.as_deref().map(|s| &s[..s.floor_char_boundary(10)]).unwrap_or_default() } else { "" };
                 format!("reservation\n{:?}\n{}\n{}\n{}\n{day}", r.kind, r.provider.to_lowercase(), r.reservation_number, r.segment.as_deref().unwrap_or_default())
             }
-            Card::Bill(b) => format!("bill\n{}\n{}\n{}", b.biller.to_lowercase(), b.reference, b.due_date.as_deref().unwrap_or_default()),
+            // A reference names the bill, also on a later notice without its due date.
+            Card::Bill(b) => format!("bill\n{}\n{}\n{}", b.biller.to_lowercase(), b.reference, if b.reference.is_empty() { b.due_date.as_deref().unwrap_or_default() } else { "" }),
         }
     }
     fn details(&self) -> Result<String, ApiError> {

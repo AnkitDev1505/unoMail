@@ -448,7 +448,20 @@ pub async fn save_overrides(db: &SqlitePool, overrides: &Map<String, Value>) -> 
 pub async fn load(db: &SqlitePool, cfg: &Config) -> sqlx::Result<Runtime> {
     let defaults = Runtime::from_config(cfg);
     let mut overrides = load_overrides(db).await?;
-    if import_legacy(cfg, &mut overrides) {
+    let mut imported: Vec<String> = crate::db::get_setting(db, LEGACY_IMPORTED_KEY).await?.and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+    let mut changed = import_legacy(cfg, &defaults, &mut overrides, &mut imported);
+    if changed {
+        crate::db::set_setting(db, LEGACY_IMPORTED_KEY, &serde_json::to_string(&imported).unwrap_or_default()).await?;
+    }
+    // One value that no longer validates must not cost all the others: it alone is dropped,
+    // and the panel can save again.
+    let invalid: Vec<String> = overrides.iter().filter(|(key, value)| defaults.with_overrides(&Map::from_iter([((*key).clone(), (*value).clone())])).is_err()).map(|(key, _)| key.clone()).collect();
+    for key in &invalid {
+        tracing::warn!(key, "a stored server setting is invalid, using its default");
+        overrides.remove(key);
+        changed = true;
+    }
+    if changed {
         save_overrides(db, &overrides).await?;
     }
     if overrides.is_empty() {
@@ -460,16 +473,22 @@ pub async fn load(db: &SqlitePool, cfg: &Config) -> sqlx::Result<Runtime> {
     }))
 }
 
-/// Copies settings still given by their old environment variables into `overrides`, unless
-/// the admin panel already set them. Returns whether anything was added.
-fn import_legacy(cfg: &Config, overrides: &mut Map<String, Value>) -> bool {
+/// Which old environment variables were copied once; a later reset in the panel must hold.
+const LEGACY_IMPORTED_KEY: &str = "server_settings.legacy_imported";
+
+/// Copies settings still given by their old environment variables into `overrides`, once and
+/// unless the admin panel already set them. Returns whether anything was added.
+fn import_legacy(cfg: &Config, defaults: &Runtime, overrides: &mut Map<String, Value>, imported: &mut Vec<String>) -> bool {
     let mut added = false;
     for setting in &cfg.legacy_settings {
-        if overrides.contains_key(setting.key) {
+        if overrides.contains_key(setting.key) || imported.iter().any(|key| key == setting.key) {
             tracing::warn!(variable = setting.env, "environment variable no longer read; the value in Server settings applies. Remove it");
+        } else if defaults.with_overrides(&Map::from_iter([(setting.key.to_owned(), setting.value.clone())])).is_err() {
+            tracing::warn!(variable = setting.env, "environment variable no longer read, and its value is not valid; it was ignored. Remove it");
         } else {
             tracing::warn!(variable = setting.env, "environment variable no longer read; its value was saved in Server settings. Remove it");
             overrides.insert(setting.key.to_owned(), setting.value.clone());
+            imported.push(setting.key.to_owned());
             added = true;
         }
     }
@@ -495,10 +514,22 @@ mod tests {
         ];
         let mut overrides = Map::new();
         overrides.insert("max_recipients".into(), json!(50));
-        assert!(import_legacy(&cfg, &mut overrides));
+        let mut imported = Vec::new();
+        assert!(import_legacy(&cfg, &defaults(), &mut overrides, &mut imported));
         assert_eq!(overrides["greylist_enabled"], json!(false));
         assert_eq!(overrides["max_recipients"], json!(50), "the admin panel's value wins");
-        assert!(!import_legacy(&cfg, &mut overrides), "nothing new the second time");
+        assert!(!import_legacy(&cfg, &defaults(), &mut overrides, &mut imported), "nothing new the second time");
+        overrides.remove("greylist_enabled");
+        assert!(!import_legacy(&cfg, &defaults(), &mut overrides, &mut imported), "a reset in the panel holds");
+    }
+
+    #[test]
+    fn an_old_environment_value_that_is_not_valid_is_not_kept() {
+        let mut cfg = Config::for_tests(std::env::temp_dir());
+        cfg.legacy_settings = vec![crate::config::LegacySetting { env: "UNOMAIL_MAX_RECIPIENTS", key: "max_recipients", value: json!(20_000_000) }];
+        let (mut overrides, mut imported) = (Map::new(), Vec::new());
+        assert!(!import_legacy(&cfg, &defaults(), &mut overrides, &mut imported));
+        assert!(overrides.is_empty());
     }
 
     #[test]

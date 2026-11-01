@@ -238,7 +238,7 @@ function Webhooks() {
                     <TableCell>{hook.events.join(', ')}</TableCell>
                     <TableCell>{hook.last_at ? `${hook.last_status} (${formatTime(hook.last_at)})` : t('Never')}</TableCell>
                     <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>
-                      <Button size="small" onClick={() => void run(async () => { await post(`/api/webhooks/${hook.id}/test`); await reload(); }, t('Test event sent'))}>
+                      <Button size="small" onClick={() => void run(async () => { const { status } = await post<{ status: unknown }>(`/api/webhooks/${hook.id}/test`); await reload(); if (!/^2/.test(String(status))) throw new Error(t('The test event failed: {{status}}', { status: String(status) })); }, t('Test event sent'))}>
                         {t('Test')}
                       </Button>
                       <Tooltip title={t('Delete webhook')}>
