@@ -362,6 +362,12 @@ test.describe('web mail extras', () => {
     await expect(attachment).toBeVisible();
     // Text opens in the preview, which offers the download.
     await attachment.click();
+    await expect(page.getByTestId('text-preview')).toHaveText('attached secret');
+    // A refresh of the open conversation must leave the decrypted files usable.
+    const refreshed = page.waitForResponse((response) => response.url().includes('/jmap') && response.request().postData()?.includes('Thread/get') === true);
+    await page.evaluate(() => window.dispatchEvent(new Event('unomail:refresh')));
+    await refreshed;
+    await page.waitForTimeout(500);
     const file = page.waitForEvent('download');
     await page.getByRole('dialog', { name: /^secret\.txt/ }).getByRole('link', { name: 'Download' }).click();
     expect(fs.readFileSync(await (await file).path(), 'utf8')).toBe('attached secret');

@@ -177,15 +177,21 @@ function MessageBody({ email, accountId, ownEmail }: { email: EmailFull; account
   const trusted = Boolean(sender) && (prefs.image_senders ?? []).includes(sender);
   const [showRemote, setShowRemote] = useState(false);
   const source = useMemo(() => encryptedSource(email), [email]);
+  // By value: reloading a conversation makes new objects for the same ciphertext, and decrypting
+  // again would revoke the file URLs that an open preview or a running download still needs.
+  const encryptedBlob = source && 'blobId' in source ? source.blobId : null;
+  const encryptedText = source && 'text' in source ? source.text : null;
   const [unlockedNow, setUnlockedNow] = useState(isUnlocked());
   const [decrypted, setDecrypted] = useState<Decrypted | null>(null);
   const [decryptError, setDecryptError] = useState('');
-  const [fileUrls, setFileUrls] = useState<{ name: string; type: string; size: number; url: string }[]>([]);
+  const [fileUrls, setFileUrls] = useState<{ name: string; type: string; size: number; url: string; data: Blob }[]>([]);
   const [preview, setPreview] = useState<PreviewFile | null>(null);
 
   // Inline images are fetched with the session cookie and handed to the frame as blob URLs,
   // because the frame itself is not allowed to make network requests.
   useEffect(() => {
+    // The images of an encrypted message come out of decrypting it, below.
+    if (source) return;
     let cancelled = false;
     const created: string[] = [];
     const inline = email.attachments.filter((a) => !isFile(a));
@@ -204,26 +210,27 @@ function MessageBody({ email, accountId, ownEmail }: { email: EmailFull; account
       cancelled = true;
       created.forEach((url) => URL.revokeObjectURL(url));
     };
-  }, [email, accountId]);
+  }, [email, accountId, source]);
 
   // Encrypted messages are decrypted in the browser once the private key is unlocked.
   useEffect(() => {
-    if (!source || !unlockedNow) return;
+    if ((encryptedBlob === null && encryptedText === null) || !unlockedNow) return;
     let cancelled = false;
     const created: string[] = [];
     (async () => {
       try {
-        const armored = 'text' in source ? source.text : await (await fetch(downloadUrl(accountId, source.blobId, 'encrypted.asc'), { credentials: 'same-origin' })).text();
+        const armored = encryptedText ?? (await (await fetch(downloadUrl(accountId, encryptedBlob!, 'encrypted.asc'), { credentials: 'same-origin' })).text());
         const keys = sender ? await lookupKeys([sender]).catch(() => (({}) as Record<string, string>)) : {};
         const opened = await decryptArmored(armored, Object.values(keys));
         if (cancelled) return;
         const inline: Record<string, string> = {};
-        const files: { name: string; type: string; size: number; url: string }[] = [];
+        const files: { name: string; type: string; size: number; url: string; data: Blob }[] = [];
         for (const file of opened.attachments) {
-          const url = URL.createObjectURL(new Blob([file.data as BlobPart], { type: file.cid && /^image\/(png|jpeg|gif|webp)$/.test(file.type) ? file.type : 'application/octet-stream' }));
+          const data = new Blob([file.data as BlobPart], { type: file.cid && /^image\/(png|jpeg|gif|webp)$/.test(file.type) ? file.type : 'application/octet-stream' });
+          const url = URL.createObjectURL(data);
           created.push(url);
           if (file.cid) inline[file.cid] = url;
-          else files.push({ name: file.name, type: file.type, size: file.data.length, url });
+          else files.push({ name: file.name, type: file.type, size: file.data.length, url, data });
         }
         decryptedBodies.set(email.id, opened.html ?? textToHtml(opened.text ?? ''));
         setCidUrls(inline);
@@ -238,7 +245,7 @@ function MessageBody({ email, accountId, ownEmail }: { email: EmailFull; account
       cancelled = true;
       created.forEach((url) => URL.revokeObjectURL(url));
     };
-  }, [source, unlockedNow, accountId, email.id, sender]);
+  }, [encryptedBlob, encryptedText, unlockedNow, accountId, email.id, sender]);
 
   const remote = showRemote || trusted;
   const rendered = useMemo(() => {

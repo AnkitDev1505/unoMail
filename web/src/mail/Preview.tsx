@@ -17,8 +17,10 @@ import { t } from '../i18n';
 export interface PreviewFile {
   name: string;
   type: string;
-  /** Where the content can be fetched from (a download address or a blob URL). */
+  /** The download address or blob URL of the file. */
   url: string;
+  /** The content, when the browser already holds it: the page's policy forbids fetching a blob URL. */
+  data?: Blob;
 }
 
 export type PreviewKind = 'image' | 'text' | 'pdf';
@@ -133,9 +135,12 @@ export function AttachmentPreview({ file, onClose }: { file: PreviewFile; onClos
     setError('');
     (async () => {
       try {
-        const response = await fetch(file.url, { credentials: 'same-origin', signal: controller.signal });
-        if (!response.ok) throw new Error(t('The attachment could not be loaded.'));
-        const blob = await readPreview(response);
+        let blob = file.data;
+        if (!blob) {
+          const response = await fetch(file.url, { credentials: 'same-origin', signal: controller.signal });
+          if (!response.ok) throw new Error(t('The attachment could not be loaded.'));
+          blob = await readPreview(response);
+        }
         if (cancelled) return;
         if (kind === 'text') {
           const bytes = new Uint8Array(await blob.slice(0, MAX_TEXT_BYTES).arrayBuffer());
@@ -157,7 +162,7 @@ export function AttachmentPreview({ file, onClose }: { file: PreviewFile; onClos
       window.clearTimeout(timer);
       if (created) URL.revokeObjectURL(created);
     };
-  }, [file.url, file.type, kind]);
+  }, [file.url, file.data, file.type, kind]);
 
   return (
     <Dialog open onClose={onClose} fullWidth maxWidth="lg">
