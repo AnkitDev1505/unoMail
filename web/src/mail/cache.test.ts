@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from 'vitest';
 import { cachedList, cachedMailboxes, cachedThread, cacheList, cacheMailboxes, cacheThread, clearAccountCache, clearMailCache, closeCache, openCache, setPersistentCache } from './cache';
 import { labelsOf, normalizeLabel } from './jmapClient';

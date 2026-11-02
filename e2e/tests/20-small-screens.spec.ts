@@ -1,14 +1,11 @@
 import { expect, test, type Page } from '@playwright/test';
-import { ADMIN, DOMAIN, smtpDeliver, USER_PASSWORD } from './helpers';
+import { ADMIN, DOMAIN, smtpDeliver, startSession, USER_PASSWORD } from './helpers';
 
 const BOB = `bob@${DOMAIN}`;
 
 /** Signs in; on a phone the folder list waits in a closed drawer, so the menu button shows it worked. */
 async function login(page: Page, email: string, password: string) {
-  await page.goto('/login');
-  await page.getByLabel('E-mail address').fill(email);
-  await page.getByLabel('Password').fill(password);
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await startSession(page, email, password);
   await expect(page.getByRole('button', { name: 'Toggle sidebar' })).toBeVisible();
 }
 

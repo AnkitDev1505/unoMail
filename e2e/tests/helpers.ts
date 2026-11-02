@@ -7,11 +7,36 @@ export { ADMIN, PORTS };
 export const USER_PASSWORD = 'e2e-user-password-1';
 export const DOMAIN = 'example.test';
 
-export async function login(page: Page, email: string, password: string) {
+/** Signs in through the form, as a person does. The sign-in itself is tested with this. */
+export async function loginWithForm(page: Page, email: string, password: string) {
   await page.goto('/login');
   await page.getByLabel('E-mail address').fill(email);
   await page.getByLabel('Password').fill(password);
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await expect(page.getByRole('navigation', { name: 'Folders' })).toBeVisible();
+}
+
+/**
+ * Starts a session without going through the form, and opens the mail. Sent mail leaves at once
+ * instead of after the undo window, which most tests would only wait for; a test of that window
+ * passes `undoSend: true`. Accounts with a second factor sign in with their own steps.
+ */
+export async function startSession(page: Page, email: string, password: string, options: { undoSend?: boolean } = {}) {
+  const session = await page.request.post('/api/auth/login', { data: { email, password } });
+  expect(session.ok(), `signing in as ${email}`).toBe(true);
+  const { csrf_token: csrf } = await session.json();
+  if (!options.undoSend) {
+    const preferences = await (await page.request.get('/api/me/preferences')).json();
+    if (preferences.undo_send_seconds === undefined) {
+      const saved = await page.request.put('/api/me/preferences', { data: { ...preferences, undo_send_seconds: 0 }, headers: { 'X-CSRF-Token': csrf } });
+      expect(saved.ok(), 'saving preferences').toBe(true);
+    }
+  }
+  await page.goto('/mail');
+}
+
+export async function login(page: Page, email: string, password: string, options: { undoSend?: boolean } = {}) {
+  await startSession(page, email, password, options);
   await expect(page.getByRole('navigation', { name: 'Folders' })).toBeVisible();
 }
 

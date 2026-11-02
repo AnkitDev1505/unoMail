@@ -16,7 +16,9 @@ export default defineConfig({
   },
   build: { outDir: 'dist', sourcemap: false, chunkSizeWarningLimit: 1200 },
   test: {
-    environment: 'jsdom',
+    // Most tests need no DOM, and creating jsdom was three quarters of the run. Those that do say
+    // so in their first line: // @vitest-environment jsdom
+    environment: 'node',
     include: ['src/**/*.test.ts'],
     setupFiles: ['src/test-setup.ts'],
     // Material's colour library: its ES modules import files without extensions, which only a bundler resolves.

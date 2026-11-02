@@ -5,6 +5,12 @@ edition = "2024"
 license = "AGPL-3.0-only"
 default-run = "unomail"
 
+# The server has no unit tests of its own (they are in the library): no test binary to link.
+[[bin]]
+name = "unomail"
+path = "src/main.rs"
+test = false
+
 [dependencies]
 aes = "0.9"
 anyhow = "1.0.104"
@@ -81,9 +87,15 @@ rlimit = "0.11"
 tempfile = "3.27.0"
 tokio-tungstenite = "0.30.0"
 
+# Line numbers in backtraces are all the tests need; full debug info made up most of the build
+# cache and of the link time. For a debugger, set CARGO_PROFILE_DEV_DEBUG=true.
+[profile.dev]
+debug = "line-tables-only"
+
 # Password hashing and RSA key generation are unusably slow without optimizations.
 [profile.dev.package."*"]
 opt-level = 2
+debug = false
 
 [profile.release]
 lto = "thin"

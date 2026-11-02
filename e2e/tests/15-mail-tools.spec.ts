@@ -39,7 +39,7 @@ test.describe('mail tools: undo send, scheduled send, snooze, read receipts', ()
   });
 
   test('a sent message can be called back, and a scheduled one cancelled', async ({ page }) => {
-    await login(page, NINA, USER_PASSWORD);
+    await login(page, NINA, USER_PASSWORD, { undoSend: true });
     await write(page, OMAR, 'Oops, not yet');
     await composer(page).getByRole('button', { name: 'Send', exact: true }).click();
     await expect(page.getByText('Message sent')).toBeVisible();

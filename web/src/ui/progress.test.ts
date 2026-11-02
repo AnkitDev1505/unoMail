@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { ThemeProvider } from '@mui/material';
 import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';

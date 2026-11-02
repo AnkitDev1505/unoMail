@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
 import { adaptForDark, contrast, darken, lighten, parseColor, type Rgb } from './darkColors';
 

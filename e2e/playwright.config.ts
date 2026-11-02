@@ -31,7 +31,8 @@ export default defineConfig({
     baseURL: `http://localhost:${PORTS.http}`,
     // The interface follows the browser language; the tests read English.
     locale: 'en-US',
-    trace: 'retain-on-failure',
+    // Recording costs about 6% of the run. CI keeps traces of failures; locally pass --trace=on.
+    trace: process.env.CI ? 'retain-on-failure' : 'off',
     screenshot: 'only-on-failure',
   },
   webServer: {

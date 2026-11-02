@@ -68,7 +68,7 @@ CSRF, rendering of hostile HTML).
 - No `unsafe` code in the server; no CORS layer (same-origin only); parameterised SQL throughout.
 - Relay: port 25 and LMTP refuse non-local recipients before `DATA`/`BDAT`; submission requires
   TLS and authentication; sender identity enforced for envelope and `From`
-  (`tests/smtp.rs`, `tests/lmtp.rs`). SRS addresses are verified before routing bounces.
+  (`tests/it/smtp.rs`, `tests/it/lmtp.rs`). SRS addresses are verified before routing bounces.
 - STARTTLS: pipelined commands after `STARTTLS` are refused (SMTP, IMAP, ManageSieve).
 - Hostile HTML is sanitised with DOMPurify and shown in an iframe without `allow-scripts`, with
   its own CSP (`default-src 'none'`, images only from `data:`/the image proxy). The iframe keeps
@@ -90,13 +90,13 @@ CSRF, rendering of hostile HTML).
   in `BEGIN IMMEDIATE` transactions, one at a time. Mail from a correspondent is exempt and
   trains "wanted" only when DMARC passed, it was sent from this server, or this server ran no
   checks (trusted relay): a forged contact address does not get past the filter or poison it
-  (`server/src/bayes.rs`, `server/tests/spam_filter.rs`).
+  (`server/src/bayes.rs`, `server/tests/it/spam_filter.rs`).
 - Passkey sign-in without a password (added after the review): options name no credentials
   (no account enumeration); the answer must carry the user verified flag and the user handle
   the credential was registered for; challenges are single-use, expire after five minutes and
   are bound to the address that asked; unknown credentials are reported as such only so the
   browser can drop them, and every failure is audited and slowed down like a wrong password
-  (`server/src/api/signin.rs`, `server/tests/signin.rs`, `e2e/tests/19-passkeys.spec.ts`).
+  (`server/src/api/signin.rs`, `server/tests/it/signin.rs`, `e2e/tests/19-passkeys.spec.ts`).
   WebAuthn is verified in-house on `ring` (no maintained Rust WebAuthn library builds without
   OpenSSL here); attestation is not checked (`none`), so the authenticator model is not proven.
 - Interface translations are static files; values are interpolated without HTML escaping

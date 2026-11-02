@@ -98,8 +98,8 @@ jobs:
           # The containers had the whole build to start; wait in case they are still going.
           for i in $(seq 1 30); do docker logs ldap 2>&1 | grep -q "slapd starting" && break; sleep 2; done
           docker cp pebble:/test/certs/pebble.minica.pem "$RUNNER_TEMP/pebble-root.pem"
-          UNOMAIL_PEBBLE_ROOT="$RUNNER_TEMP/pebble-root.pem" cargo test --locked --test acme_live -- --ignored
-          cargo test --locked --test ldap_live -- --ignored
+          UNOMAIL_PEBBLE_ROOT="$RUNNER_TEMP/pebble-root.pem" cargo test --locked --test it acme_live:: -- --ignored
+          cargo test --locked --test it ldap_live:: -- --ignored
 
   web:
     needs: changes

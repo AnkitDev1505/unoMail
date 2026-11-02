@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
 import { formatAddress, htmlToText, parseRecipients } from './jmapClient';
 import { buildFrameDocument, escapeHtml, sanitizeEmail, sanitizeEmailHtml, textToHtml } from './sanitize';

@@ -1,0 +1,53 @@
+//! The integration tests, as one binary. Linking one binary per test file took most of the time
+//! of a test run and most of the build cache. Run one file with `cargo test --test it <file>::`.
+
+mod common;
+
+mod abuseipdb;
+mod access;
+mod accounts_switcher;
+mod acme_live;
+mod api;
+mod calendar;
+mod crash_regressions;
+mod dmarc_outgoing;
+mod dsn;
+mod features;
+mod features2;
+mod geo_live;
+mod groupware;
+mod hostile_mime;
+mod imap_extensions;
+mod imap_notify_metadata;
+mod imap_sync;
+mod impersonation;
+mod inbox_tools;
+mod interop;
+mod jmap;
+mod jmap_groupware;
+mod jmap_push;
+mod ldap_live;
+mod lists;
+mod lmtp;
+mod mail_features;
+mod mailbox_protocols;
+mod managesieve;
+mod masked_email;
+mod milter;
+mod packages;
+mod resilience;
+mod search;
+mod security_regressions;
+mod send_only;
+mod sender_trust;
+mod server_settings;
+mod sharing;
+mod signin;
+mod smime;
+mod smtp;
+mod spam_filter;
+mod sso;
+mod storage;
+mod summary_cards;
+mod transport;
+mod webmail;

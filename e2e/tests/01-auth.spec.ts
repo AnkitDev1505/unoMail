@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { ADMIN, login, logout } from './helpers';
+import { ADMIN, loginWithForm as login, logout } from './helpers';
 
 test.describe('authentication', () => {
   test('unauthenticated visitors are sent to the login page', async ({ page }) => {

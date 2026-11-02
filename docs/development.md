@@ -6,6 +6,8 @@ Requirements: Rust (stable), Node 26 with pnpm, Docker. On Windows, also CMake a
 
 ```sh
 cd server && cargo test && cargo clippy --all-targets -- -D warnings
+cd server && cargo test --test it smtp::   # one file of tests/it
+cd server && cargo nextest run             # as CI does: faster, each test in its own process (no doctests)
 cd web && pnpm install && pnpm run typecheck && pnpm test && pnpm run build
 cd e2e && pnpm install && pnpm exec playwright install chromium && pnpm test
 ./audit.sh
@@ -14,8 +16,8 @@ cd e2e && pnpm install && pnpm exec playwright install chromium && pnpm test
 Live tests (need Docker; see each file's header):
 
 ```sh
-cd server && cargo test --test acme_live -- --ignored
-cd server && cargo test --test ldap_live -- --ignored
+cd server && cargo test --test it acme_live:: -- --ignored
+cd server && cargo test --test it ldap_live:: -- --ignored
 ```
 
 ## Local server with hot reload

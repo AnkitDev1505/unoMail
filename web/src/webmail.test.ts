@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('./lib/api', () => ({ get: vi.fn(async () => []), put: vi.fn(async () => ({})), post: vi.fn(), del: vi.fn(), postRaw: vi.fn() }));
