@@ -66,17 +66,17 @@ fn clean(text: &str) -> String {
 /// What the model is shown of a message, between the nonce markers.
 pub fn digest(raw: &[u8], verified_domain: Option<&str>, nonce: &str) -> Option<String> {
     let message = MessageParser::default().parse(raw)?;
-    let from = message.from().and_then(|list| list.first()).map(|a| format!("{} <{}>", a.name.as_deref().unwrap_or(""), a.address.as_deref().unwrap_or(""))).unwrap_or_default();
-    let reply_to = message.reply_to().and_then(|list| list.first()).and_then(|a| a.address.as_deref()).unwrap_or("").to_owned();
+    let from = message.from().and_then(|list| list.first()).map(|a| format!("{} <{}>", a.name().unwrap_or(""), a.address().unwrap_or(""))).unwrap_or_default();
+    let reply_to = message.reply_to().and_then(|list| list.first()).and_then(|a| a.address()).unwrap_or("").to_owned();
     let mut text = String::new();
-    for index in 0..message.text_body.len().min(5) {
+    for index in 0..message.text_body().len().min(5) {
         if let Some(part) = message.body_text(index) {
             text.push_str(&part);
             text.push('\n');
         }
     }
     let mut links = Vec::new();
-    for index in 0..message.html_body.len().min(5) {
+    for index in 0..message.html_body().len().min(5) {
         if let Some(html) = message.body_html(index) {
             for anchor in ANCHOR.captures_iter(&html).take(MAX_LINKS) {
                 let shown = TAG.replace_all(&anchor[2], "").split_whitespace().collect::<Vec<_>>().join(" ");

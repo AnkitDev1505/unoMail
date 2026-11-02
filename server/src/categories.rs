@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use mail_parser::{HeaderValue, MessageParser};
+use mail_parser::MessageParser;
 use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 
 
@@ -83,10 +83,6 @@ const PROMOTIONAL_WORDS: [&str; 24] = [
     "exclusive", "clearance", "this week", "last chance", "rabat", "promocj", "wyprzeda", "oferta", "kupon", "zniżk",
 ];
 
-fn has(value: &HeaderValue<'_>) -> bool {
-    !matches!(value, HeaderValue::Empty)
-}
-
 /// Whether `domain` is `suffix` or one of its subdomains.
 fn within(domain: &str, suffix: &str) -> bool {
     domain == suffix || domain.strip_suffix(suffix).is_some_and(|rest| rest.ends_with('.'))
@@ -97,8 +93,8 @@ fn within(domain: &str, suffix: &str) -> bool {
 /// automatic system?) and, as a tie-breaker, what the subject says.
 pub fn classify(raw: &[u8]) -> Category {
     let Some(message) = MessageParser::default().parse_headers(raw) else { return Category::General };
-    let header = |name: &str| message.header(name).is_some_and(has);
-    let text = |name: &str| message.header(name).and_then(|value| value.as_text()).unwrap_or("").to_ascii_lowercase();
+    let text = |name: &str| crate::mime::raw_header(message.headers(), name).unwrap_or("").trim().to_ascii_lowercase();
+    let header = |name: &str| !text(name).is_empty();
     let from = message.from().and_then(|list| list.first()).and_then(|address| address.address()).unwrap_or("").to_ascii_lowercase();
     let (local, domain) = from.rsplit_once('@').unwrap_or(("", ""));
     let subject = message.subject().unwrap_or("").to_lowercase();

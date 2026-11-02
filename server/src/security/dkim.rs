@@ -2,11 +2,9 @@
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use mail_auth::{
-    common::{
-        crypto::{Ed25519Key, RsaKey, Sha256},
-        headers::HeaderWriter,
-    },
+    crypto::{Ed25519Key, RsaKey, Sha256},
     dkim::DkimSigner,
+    headers::HeaderWriter,
 };
 use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
 use rustls::pki_types::{PrivateKeyDer, pem::PemObject};

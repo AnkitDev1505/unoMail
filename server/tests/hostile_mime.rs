@@ -20,7 +20,7 @@ fn deeply_nested_multiparts_parse_without_overflowing_the_stack() {
         let raw = nested(depth);
         let started = Instant::now();
         // Parsed on a thread with the default stack, as a server task would be.
-        let handle = std::thread::Builder::new().stack_size(2 * 1024 * 1024).spawn(move || mail_parser::MessageParser::default().parse(&raw).map(|m| m.parts.len())).unwrap();
+        let handle = std::thread::Builder::new().stack_size(2 * 1024 * 1024).spawn(move || mail_parser::MessageParser::default().parse(&raw).map(|m| m.parts().len())).unwrap();
         let parts = handle.join().expect("the parser must not overflow the stack");
         println!("depth {depth}: {parts:?} parts in {:?}", started.elapsed());
         assert!(started.elapsed() < Duration::from_secs(10), "depth {depth} took {:?}", started.elapsed());
@@ -40,6 +40,6 @@ fn many_parts_and_headers_stay_bounded() {
     out.push_str("--b--\r\n");
     let started = Instant::now();
     let parsed = mail_parser::MessageParser::default().parse(out.as_bytes()).unwrap();
-    println!("{} parts in {:?}", parsed.parts.len(), started.elapsed());
+    println!("{} parts in {:?}", parsed.parts().len(), started.elapsed());
     assert!(started.elapsed() < Duration::from_secs(10));
 }

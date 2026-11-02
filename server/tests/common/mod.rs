@@ -48,6 +48,8 @@ impl TestEnv {
     }
 
     pub async fn start_with(configure: impl FnOnce(&mut Config)) -> Self {
+        // As main does: with more than one crypto backend linked, rustls cannot choose by itself.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = Config::for_tests(dir.path().to_path_buf());
         configure(&mut cfg);

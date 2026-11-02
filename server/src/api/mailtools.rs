@@ -281,8 +281,8 @@ impl Unsubscribe {
 /// Reads the unsubscribe options from a message's `List-Unsubscribe` headers.
 pub fn unsubscribe_options(raw: &[u8]) -> Unsubscribe {
     let Some(message) = MessageParser::default().parse_headers(raw) else { return Unsubscribe::default() };
-    let Some(list) = message.header_raw("List-Unsubscribe") else { return Unsubscribe::default() };
-    let one_click_declared = message.header_raw("List-Unsubscribe-Post").is_some_and(|value| value.to_ascii_lowercase().replace(char::is_whitespace, "").contains("list-unsubscribe=one-click"));
+    let Some(list) = crate::mime::raw_header(message.headers(), "List-Unsubscribe") else { return Unsubscribe::default() };
+    let one_click_declared = crate::mime::raw_header(message.headers(), "List-Unsubscribe-Post").is_some_and(|value| value.to_ascii_lowercase().replace(char::is_whitespace, "").contains("list-unsubscribe=one-click"));
     let mut out = Unsubscribe::default();
     // The header is a comma-separated list of <uri> entries, possibly folded over lines.
     for part in list.split('<').skip(1) {

@@ -448,8 +448,8 @@ fn gzip(data: &[u8]) -> Vec<u8> {
 }
 
 /// Builds the report for one domain and day (RFC 8460 section 4).
-pub async fn build_report(app: &App, domain: &str, day: i64) -> sqlx::Result<Option<mail_auth::report::tlsrpt::TlsReport>> {
-    use mail_auth::report::tlsrpt::{DateRange, FailureDetails, Policy, PolicyDetails, PolicyType, ResultType, Summary, TlsReport};
+pub async fn build_report(app: &App, domain: &str, day: i64) -> sqlx::Result<Option<crate::mail_report::tlsrpt::TlsReport>> {
+    use crate::mail_report::tlsrpt::{DateRange, FailureDetails, Policy, PolicyDetails, PolicyType, ResultType, Summary, TlsReport};
     let rows: Vec<(String, String, String, String, String, i64)> = sqlx::query_as("SELECT policy_type, policy_string, mx_host, result_type, receiving_ip, count FROM tls_rpt_results WHERE day = ? AND domain = ? ORDER BY policy_type, mx_host").bind(day).bind(domain).fetch_all(&app.db).await?;
     if rows.is_empty() {
         return Ok(None);
@@ -565,23 +565,22 @@ pub async fn ingest_mail(app: &App, raw: &[u8]) {
         return;
     }
     let Some(message) = mail_parser::MessageParser::default().parse(raw) else { return };
-    use mail_parser::MimeHeaders;
-    for part in message.parts.iter() {
+    for part in message.root().parts() {
         let kind = part.content_type().map(|ct| format!("{}/{}", ct.ctype(), ct.subtype().unwrap_or("")).to_ascii_lowercase()).unwrap_or_default();
         if !kind.starts_with("application/tlsrpt") {
             continue;
         }
-        let data = part.contents();
+        let data = part.decoded();
         let json = if data.starts_with(&[0x1f, 0x8b]) {
             let mut out = Vec::new();
-            if flate2::read::GzDecoder::new(data).take(10 * 1024 * 1024).read_to_end(&mut out).is_err() {
+            if flate2::read::GzDecoder::new(&data[..]).take(10 * 1024 * 1024).read_to_end(&mut out).is_err() {
                 continue;
             }
             out
         } else {
             data.to_vec()
         };
-        match serde_json::from_slice::<mail_auth::report::tlsrpt::TlsReport>(&json) {
+        match serde_json::from_slice::<crate::mail_report::tlsrpt::TlsReport>(&json) {
             Ok(report) => store_received(app, &report).await,
             Err(err) => tracing::info!(%err, "not a usable TLS report"),
         }
@@ -589,7 +588,7 @@ pub async fn ingest_mail(app: &App, raw: &[u8]) {
 }
 
 /// Stores a received report: one row per policy, for domains hosted here.
-pub async fn store_received(app: &App, report: &mail_auth::report::tlsrpt::TlsReport) {
+pub async fn store_received(app: &App, report: &crate::mail_report::tlsrpt::TlsReport) {
     let reporter = report.organization_name.clone().unwrap_or_default().chars().filter(|c| !c.is_control()).take(200).collect::<String>();
     for policy in &report.policies {
         let domain = policy.policy.policy_domain.to_ascii_lowercase();

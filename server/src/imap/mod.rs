@@ -1770,7 +1770,7 @@ impl Session {
                 let mut out = Vec::new();
                 if let Some((_, size_only, wanted)) = binary.iter().find(|(at, ..)| *at == position) {
                     let Some(parsed) = &parsed else { continue };
-                    let decoded = match fetch::binary_bytes(&raw, parsed, wanted) {
+                    let decoded = match fetch::binary_bytes(&raw, parsed.root(), wanted) {
                         Ok(decoded) => decoded,
                         Err(fetch::BinaryError::UnknownEncoding) => return Ok(no("[UNKNOWN-CTE] the part has an unknown transfer encoding")),
                         Err(fetch::BinaryError::NoSuchPart) => None,
@@ -1818,9 +1818,9 @@ impl Session {
                         out.extend_from_slice(name.as_bytes());
                         out.push(b' ');
                         if name == "ENVELOPE" {
-                            fetch::envelope(&mut out, parsed);
+                            fetch::envelope(&mut out, parsed.root());
                         } else {
-                            fetch::body_structure(&mut out, parsed, &raw, &parsed.parts[0], name == "BODYSTRUCTURE", 0);
+                            fetch::body_structure(&mut out, parsed.root_part(), name == "BODYSTRUCTURE", 0);
                         }
                     }
                     (_, None) => {
@@ -1830,13 +1830,13 @@ impl Session {
                             _ => "",
                         };
                         let section = Section::parse(spec, "").expect("static section specification");
-                        let bytes = parsed.as_ref().and_then(|p| fetch::section_bytes(&raw, p, &section)).unwrap_or_else(|| if spec.is_empty() { raw.clone() } else { Vec::new() });
+                        let bytes = parsed.as_ref().and_then(|p| fetch::section_bytes(&raw, p.root(), &section)).unwrap_or_else(|| if spec.is_empty() { raw.clone() } else { Vec::new() });
                         mark_seen |= name != "RFC822.HEADER";
                         out.extend_from_slice(format!("{name} {{{}}}\r\n", bytes.len()).as_bytes());
                         out.extend_from_slice(&bytes);
                     }
                     (_, Some((peek, section))) => {
-                        let bytes = parsed.as_ref().and_then(|p| fetch::section_bytes(&raw, p, section));
+                        let bytes = parsed.as_ref().and_then(|p| fetch::section_bytes(&raw, p.root(), section));
                         mark_seen |= !peek;
                         out.extend_from_slice(section.response_name().as_bytes());
                         match bytes {

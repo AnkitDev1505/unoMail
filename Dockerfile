@@ -2,7 +2,7 @@
 # unoMail: mail server, web client, admin panel, Rspamd and ClamAV in one container.
 
 # --- Web UI -------------------------------------------------------------------------------
-FROM node:24-alpine AS web
+FROM node:26-alpine AS web
 WORKDIR /build
 # npm installs the pinned pnpm on any version; later Node releases no longer ship corepack.
 RUN npm install -g pnpm@11.1.2
@@ -13,7 +13,7 @@ RUN pnpm run build
 
 # --- Server -------------------------------------------------------------------------------
 FROM rust:1-alpine AS server
-RUN apk add --no-cache build-base
+RUN apk add --no-cache build-base cmake
 WORKDIR /build
 COPY server/Cargo.toml server/Cargo.lock ./
 # Build dependencies in their own layer so source changes do not recompile them.

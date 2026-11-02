@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use mail_parser::{MessageParser, MimeHeaders};
+use mail_parser::MessageParser;
 use sha2::{Digest, Sha256};
 use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 
@@ -98,7 +98,7 @@ pub fn tokenize(raw: &[u8]) -> Option<(String, Vec<String>)> {
         cut -= 1;
     }
     add_words("", &text[..cut], &mut tokens);
-    for part in &message.parts {
+    for part in message.root().parts() {
         if let Some(name) = part.attachment_name() {
             let extension = name.rsplit_once('.').map_or("", |(_, e)| e).to_ascii_lowercase();
             tokens.insert(format!("a:{extension}"));
@@ -391,8 +391,7 @@ pub async fn learn_from_reply(app: &App, account_id: i64, raw: &[u8]) {
         return;
     }
     let Some(parsed) = MessageParser::default().parse_headers(raw) else { return };
-    let header = parsed.in_reply_to();
-    let Some(parent) = header.as_text().or_else(|| header.as_text_list().and_then(|list| list.first().map(|id| id.as_ref()))) else { return };
+    let Some(parent) = parsed.in_reply_to().and_then(|list| list.first()) else { return };
     let parent = parent.trim_matches(['<', '>', ' ']).to_owned();
     let found: Option<String> = sqlx::query_scalar(
         "SELECT m.blob_hash FROM messages m JOIN mailboxes b ON b.id = m.mailbox_id

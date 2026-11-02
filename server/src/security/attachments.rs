@@ -9,7 +9,7 @@
 
 use std::io::{Cursor, Read};
 
-use mail_parser::{Message, MessageParser, MimeHeaders, PartType};
+use mail_parser::{MessageParser, MessageRef, PartKind};
 
 /// File types that run code when opened. Mirrors the "dangerous" list of the web client
 /// (web/src/mail/risk.ts), limited to the types no one needs to mail around: developer formats
@@ -95,27 +95,27 @@ fn blocked_in_zip(data: &[u8], depth: usize, budget: &mut u64) -> Option<String>
     None
 }
 
-fn find_blocked(message: &Message<'_>, depth: usize, budget: &mut u64) -> Option<String> {
-    for part in &message.parts {
+fn find_blocked(message: MessageRef<'_>, depth: usize, budget: &mut u64) -> Option<String> {
+    for part in message.parts() {
         let name = part.attachment_name();
         if let Some(name) = name
             && is_blocked_name(name)
         {
             return Some(name.to_owned());
         }
-        match &part.body {
-            PartType::Message(_) if depth >= MAX_DEPTH => return Some("attached messages nested too deeply".into()),
-            PartType::Message(inner) => {
+        match part.kind() {
+            PartKind::Message(_) if depth >= MAX_DEPTH => return Some("attached messages nested too deeply".into()),
+            PartKind::Message(inner) => {
                 if let Some(found) = find_blocked(inner, depth + 1, budget) {
                     return Some(found);
                 }
             }
             // Whatever the part is labelled, a mail program saves what its name and content say.
-            PartType::Binary(_) | PartType::InlineBinary(_) | PartType::Text(_) | PartType::Html(_) => {
+            PartKind::Binary | PartKind::InlineBinary | PartKind::Text | PartKind::Html => {
                 let content_type = part.content_type().map(|ct| (ct.ctype(), ct.subtype()));
-                let data = part.contents();
-                if is_zip(name, content_type, data)
-                    && let Some(inner) = blocked_in_zip(data, depth, budget)
+                let data = part.decoded();
+                if is_zip(name, content_type, &data)
+                    && let Some(inner) = blocked_in_zip(&data, depth, budget)
                 {
                     return Some(format!("{} in {}", inner, name.unwrap_or("an archive")));
                 }
@@ -129,7 +129,7 @@ fn find_blocked(message: &Message<'_>, depth: usize, budget: &mut u64) -> Option
 /// The first attachment (or archive member) of a raw message that runs code when opened.
 pub fn blocked_attachment(raw: &[u8]) -> Option<String> {
     let message = MessageParser::default().parse(raw)?;
-    find_blocked(&message, 0, &mut MAX_UNPACKED.clone()).map(|name| crate::util::sanitize_line(&name).chars().take(120).collect())
+    find_blocked(message.root(), 0, &mut MAX_UNPACKED.clone()).map(|name| crate::util::sanitize_line(&name).chars().take(120).collect())
 }
 
 /// The SMTP reply refusing a message that carries a program.

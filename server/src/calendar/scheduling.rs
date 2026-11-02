@@ -15,7 +15,7 @@ use mail_builder::{
     headers::content_type::ContentType,
     mime::{BodyPart, MimePart},
 };
-use mail_parser::{MessageParser, MimeHeaders, PartType};
+use mail_parser::{MessageParser, PartKind};
 
 use super::{
     ical::{self, Component, Property},
@@ -234,13 +234,13 @@ pub async fn send(app: &App, me: &Account, author: &Account, messages: &[Outgoin
 /// The calendar data carried by a message, if any: an invitation, an answer, a cancellation.
 pub fn calendar_part(raw: &[u8]) -> Option<String> {
     let message = MessageParser::default().parse(raw)?;
-    message.parts.iter().find_map(|part| {
+    message.root().parts().find_map(|part| {
         let kind = part.content_type()?;
         let named_ics = part.attachment_name().is_some_and(|name| name.to_ascii_lowercase().ends_with(".ics"));
         let is_calendar = (kind.ctype().eq_ignore_ascii_case("text") && kind.subtype().is_some_and(|sub| sub.eq_ignore_ascii_case("calendar"))) || named_ics;
-        let text = match &part.body {
-            PartType::Text(text) | PartType::Html(text) if is_calendar => text.to_string(),
-            PartType::Binary(bytes) | PartType::InlineBinary(bytes) if is_calendar => String::from_utf8(bytes.to_vec()).ok()?,
+        let text = match part.kind() {
+            PartKind::Text | PartKind::Html if is_calendar => part.text()?.into_owned(),
+            PartKind::Binary | PartKind::InlineBinary if is_calendar => String::from_utf8(part.decoded().into_owned()).ok()?,
             _ => return None,
         };
         (text.len() <= ical::MAX_OBJECT_BYTES && text.contains("BEGIN:VCALENDAR")).then_some(text)
@@ -422,7 +422,7 @@ ORGANIZER:mailto:bob@example.org\r\n{extra}BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRI
         assert!(!text.lines().any(|line| line.to_ascii_lowercase().starts_with("bcc:")), "{text}");
         let parsed = MessageParser::default().parse(&raw).unwrap();
         assert_eq!(parsed.to().unwrap().first().unwrap().address(), Some("carol@example.org"));
-        let kinds: Vec<String> = parsed.parts.iter().filter_map(|part| part.content_type().map(|kind| format!("{}/{}", kind.ctype(), kind.subtype().unwrap_or("")))).collect();
+        let kinds: Vec<String> = parsed.parts().filter_map(|part| part.content_type().map(|kind| format!("{}/{}", kind.ctype(), kind.subtype().unwrap_or("")))).collect();
         assert_eq!(kinds, ["multipart/mixed", "multipart/alternative", "text/plain", "text/calendar", "application/ics"]);
         assert!(text.contains("method=REQUEST") || text.contains("method=\"REQUEST\""));
         assert_eq!(calendar_part(&raw).as_deref(), Some(message.ics.as_str()));

@@ -19,7 +19,7 @@ use cms::{
     signed_data::{EncapsulatedContentInfo, SignedData, SignerIdentifier},
 };
 use der::{Any, Decode, Encode, asn1::OctetString, oid::ObjectIdentifier};
-use mail_parser::{MessageParser, MimeHeaders};
+use mail_parser::MessageParser;
 use rsa::{
     RsaPrivateKey, RsaPublicKey,
     pkcs1v15::{Pkcs1v15Encrypt, Pkcs1v15Sign},
@@ -425,7 +425,7 @@ fn content_type(raw: &[u8]) -> Option<(String, Vec<(String, String)>)> {
     let message = MessageParser::default().parse_headers(raw)?;
     let ct = message.content_type()?;
     let kind = format!("{}/{}", ct.ctype(), ct.subtype().unwrap_or("")).to_ascii_lowercase();
-    let params = ct.attributes().map(|attrs| attrs.iter().map(|a| (a.name.to_ascii_lowercase(), a.value.to_string())).collect()).unwrap_or_default();
+    let params = ct.attributes().map(|(name, value)| (name.to_ascii_lowercase(), value.to_string())).collect();
     Some((kind, params))
 }
 
@@ -487,7 +487,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// The base64 body of a single-part message (an `application/pkcs7-mime` one).
 fn decoded_body(raw: &[u8]) -> Option<Vec<u8>> {
     let message = MessageParser::default().parse(raw)?;
-    Some(message.parts.first()?.contents().to_vec())
+    Some(message.root_part().decoded().into_owned())
 }
 
 fn author(raw: &[u8]) -> String {

@@ -1,6 +1,6 @@
 //! FETCH data items: envelope, body structure and body sections.
 
-use mail_parser::{Address, HeaderValue, Message as Parsed, MessagePart, MimeHeaders, PartType};
+use mail_parser::{AddressList, ContentType, MessagePart, MessageRef, PartKind};
 
 use super::parse::{nstring, string};
 use crate::security::authn::find_header_end;
@@ -9,8 +9,8 @@ fn unfold(value: &str) -> String {
     value.replace(['\r', '\n'], "").trim().to_owned()
 }
 
-fn address_list(out: &mut Vec<u8>, list: Option<&Address<'_>>) {
-    let entries: Vec<_> = list.map(|l| l.iter().filter(|a| a.address().is_some()).collect()).unwrap_or_default();
+fn address_list(out: &mut Vec<u8>, list: Option<AddressList<'_>>) {
+    let entries: Vec<_> = list.map(|l| l.mailboxes().filter(|a| a.address().is_some()).collect()).unwrap_or_default();
     if entries.is_empty() {
         out.extend_from_slice(b"NIL");
         return;
@@ -31,16 +31,12 @@ fn address_list(out: &mut Vec<u8>, list: Option<&Address<'_>>) {
     out.push(b')');
 }
 
-fn first_text(value: &HeaderValue<'_>) -> Option<String> {
-    value.as_text_list().and_then(|l| l.first().map(|s| format!("<{s}>"))).or_else(|| value.as_text().map(|s| format!("<{s}>")))
-}
-
 /// ENVELOPE: (date subject from sender reply-to to cc bcc in-reply-to message-id)
-pub fn envelope(out: &mut Vec<u8>, msg: &Parsed<'_>) {
+pub fn envelope(out: &mut Vec<u8>, msg: MessageRef<'_>) {
     out.push(b'(');
-    nstring(out, msg.header_raw("Date").map(unfold).as_deref().map(str::as_bytes));
+    nstring(out, crate::mime::raw_header(msg.headers(), "Date").map(unfold).as_deref().map(str::as_bytes));
     out.push(b' ');
-    nstring(out, msg.header_raw("Subject").map(unfold).as_deref().map(str::as_bytes));
+    nstring(out, crate::mime::raw_header(msg.headers(), "Subject").map(unfold).as_deref().map(str::as_bytes));
     out.push(b' ');
     address_list(out, msg.from());
     out.push(b' ');
@@ -52,51 +48,43 @@ pub fn envelope(out: &mut Vec<u8>, msg: &Parsed<'_>) {
         address_list(out, list);
     }
     out.push(b' ');
-    nstring(out, first_text(msg.in_reply_to()).as_deref().map(str::as_bytes));
+    nstring(out, msg.in_reply_to().and_then(|list| list.first()).map(|id| format!("<{id}>")).as_deref().map(str::as_bytes));
     out.push(b' ');
     nstring(out, msg.message_id().map(|id| format!("<{id}>")).as_deref().map(str::as_bytes));
     out.push(b')');
 }
 
-fn part_bytes<'a>(raw: &'a [u8], part: &MessagePart<'_>) -> &'a [u8] {
-    raw.get(part.offset_body as usize..part.offset_end as usize).unwrap_or(&[])
-}
-
-fn params(out: &mut Vec<u8>, attributes: Option<&[mail_parser::Attribute<'_>]>) {
-    match attributes.filter(|a| !a.is_empty()) {
-        Some(attributes) => {
-            out.push(b'(');
-            for (i, attribute) in attributes.iter().enumerate() {
-                if i > 0 {
-                    out.push(b' ');
-                }
-                string(out, attribute.name.as_bytes());
-                out.push(b' ');
-                string(out, attribute.value.as_bytes());
-            }
-            out.push(b')');
-        }
-        None => out.extend_from_slice(b"NIL"),
+fn params(out: &mut Vec<u8>, content_type: Option<ContentType<'_>>) {
+    let attributes: Vec<_> = content_type.map(|c| c.attributes().collect()).unwrap_or_default();
+    if attributes.is_empty() {
+        out.extend_from_slice(b"NIL");
+        return;
     }
+    out.push(b'(');
+    for (i, (name, value)) in attributes.into_iter().enumerate() {
+        if i > 0 {
+            out.push(b' ');
+        }
+        string(out, name.as_bytes());
+        out.push(b' ');
+        string(out, value.as_bytes());
+    }
+    out.push(b')');
 }
 
 /// BODYSTRUCTURE of `part`, recursing into multiparts. `extended` adds the extension fields.
-pub fn body_structure(out: &mut Vec<u8>, msg: &Parsed<'_>, raw: &[u8], part: &MessagePart<'_>, extended: bool, depth: usize) {
+pub fn body_structure(out: &mut Vec<u8>, part: MessagePart<'_>, extended: bool, depth: usize) {
     let content_type = part.content_type();
-    if let PartType::Multipart(children) = &part.body
-        && depth < 20
-    {
+    if part.is_multipart() && depth < 20 {
         out.push(b'(');
-        for child in children {
-            if let Some(child) = msg.parts.get(*child as usize) {
-                body_structure(out, msg, raw, child, extended, depth + 1);
-            }
+        for child in part.children() {
+            body_structure(out, child, extended, depth + 1);
         }
         out.push(b' ');
         string(out, content_type.and_then(|c| c.subtype()).unwrap_or("mixed").to_ascii_uppercase().as_bytes());
         if extended {
             out.push(b' ');
-            params(out, content_type.and_then(|c| c.attributes()));
+            params(out, content_type);
             out.extend_from_slice(b" NIL NIL");
         }
         out.push(b')');
@@ -106,13 +94,13 @@ pub fn body_structure(out: &mut Vec<u8>, msg: &Parsed<'_>, raw: &[u8], part: &Me
         Some(c) => (c.ctype().to_ascii_uppercase(), c.subtype().unwrap_or("PLAIN").to_ascii_uppercase()),
         None => ("TEXT".to_owned(), "PLAIN".to_owned()),
     };
-    let body = part_bytes(raw, part);
+    let body = part.raw_body();
     out.push(b'(');
     string(out, ctype.as_bytes());
     out.push(b' ');
     string(out, subtype.as_bytes());
     out.push(b' ');
-    params(out, content_type.and_then(|c| c.attributes()));
+    params(out, content_type);
     out.push(b' ');
     nstring(out, part.content_id().map(|id| format!("<{id}>")).as_deref().map(str::as_bytes));
     out.push(b' ');
@@ -124,16 +112,15 @@ pub fn body_structure(out: &mut Vec<u8>, msg: &Parsed<'_>, raw: &[u8], part: &Me
         out.extend_from_slice(format!(" {}", body.iter().filter(|b| **b == b'\n').count()).as_bytes());
     }
     // An attached message also has its envelope, its structure and its size in lines.
-    if let PartType::Message(inner) = &part.body
+    if let PartKind::Message(inner) = part.kind()
         && ctype == "MESSAGE"
         && subtype == "RFC822"
-        && let Some(first) = inner.parts.first()
         && depth < 20
     {
         out.push(b' ');
         envelope(out, inner);
         out.push(b' ');
-        body_structure(out, inner, inner.raw_message(), first, extended, depth + 1);
+        body_structure(out, inner.root_part(), extended, depth + 1);
         out.extend_from_slice(format!(" {}", body.iter().filter(|b| **b == b'\n').count()).as_bytes());
     }
     if extended {
@@ -143,7 +130,7 @@ pub fn body_structure(out: &mut Vec<u8>, msg: &Parsed<'_>, raw: &[u8], part: &Me
                 out.push(b'(');
                 string(out, disposition.ctype().to_ascii_uppercase().as_bytes());
                 out.push(b' ');
-                params(out, disposition.attributes());
+                params(out, Some(disposition));
                 out.push(b')');
             }
             None => out.extend_from_slice(b"NIL"),
@@ -249,19 +236,19 @@ pub enum BinaryError {
 
 /// The contents of a part with its transfer encoding undone (RFC 3516), or the whole message
 /// for an empty path. `Ok(None)` is a part that does not exist (answered with NIL).
-pub fn binary_bytes(raw: &[u8], msg: &Parsed<'_>, section: &Section) -> Result<Option<Vec<u8>>, BinaryError> {
+pub fn binary_bytes(raw: &[u8], msg: MessageRef<'_>, section: &Section) -> Result<Option<Vec<u8>>, BinaryError> {
     if section.path.is_empty() {
         return Ok(Some(raw.to_vec()));
     }
     let part = match resolve_part(msg, &section.path) {
         None => return Ok(None),
-        Some(Found::Inside(inner, path)) => return binary_bytes(inner.raw_message(), inner, &Section { path, kind: section.kind.clone(), partial: None }),
+        Some(Found::Inside(inner, path)) => return binary_bytes(inner.raw(), inner, &Section { path, kind: section.kind.clone(), partial: None }),
         Some(Found::Part(part)) => part,
     };
-    if matches!(part.body, mail_parser::PartType::Multipart(_)) {
+    if part.is_multipart() {
         return Err(BinaryError::NoSuchPart);
     }
-    let Some(body) = raw.get(part.offset_body as usize..part.offset_end as usize) else { return Ok(None) };
+    let body = part.raw_body();
     let encoding = part.content_transfer_encoding().unwrap_or("7bit").trim().to_ascii_lowercase();
     match encoding.as_str() {
         "7bit" | "8bit" | "binary" | "" => Ok(Some(body.to_vec())),
@@ -325,31 +312,33 @@ fn filter_headers(headers: &[u8], names: &[String], not: bool) -> Vec<u8> {
 }
 
 /// The part a path leads to, or the attached message it goes into with the rest of the path.
-enum Found<'a, 'x> {
-    Part(&'a MessagePart<'x>),
-    Inside(&'a Parsed<'x>, Vec<u32>),
+enum Found<'m> {
+    Part(MessagePart<'m>),
+    Inside(MessageRef<'m>, Vec<u32>),
 }
 
-fn resolve_part<'a, 'x>(msg: &'a Parsed<'x>, path: &[u32]) -> Option<Found<'a, 'x>> {
-    let mut part = msg.parts.first()?;
+fn resolve_part<'m>(msg: MessageRef<'m>, path: &[u32]) -> Option<Found<'m>> {
+    let mut part = msg.root_part();
     for (done, number) in path.iter().enumerate() {
         if done > 0
-            && let PartType::Message(inner) = &part.body
+            && let PartKind::Message(inner) = part.kind()
         {
             return Some(Found::Inside(inner, path[done..].to_vec()));
         }
-        part = match &part.body {
-            PartType::Multipart(children) => msg.parts.get(*children.get(*number as usize - 1)? as usize)?,
+        part = if part.is_multipart() {
+            part.children().nth(*number as usize - 1)?
+        } else if *number == 1 {
             // A non-multipart message has exactly one part: itself.
-            _ if *number == 1 => part,
-            _ => return None,
+            part
+        } else {
+            return None;
         };
     }
     Some(Found::Part(part))
 }
 
 /// Extracts the bytes selected by `section` from the raw message.
-pub fn section_bytes(raw: &[u8], msg: &Parsed<'_>, section: &Section) -> Option<Vec<u8>> {
+pub fn section_bytes(raw: &[u8], msg: MessageRef<'_>, section: &Section) -> Option<Vec<u8>> {
     // The header block includes the blank line that terminates it.
     let split = find_header_end(raw);
     let header_end = if raw[split..].starts_with(b"\r\n") {
@@ -369,17 +358,16 @@ pub fn section_bytes(raw: &[u8], msg: &Parsed<'_>, section: &Section) -> Option<
         }
     } else {
         match resolve_part(msg, &section.path)? {
-            Found::Inside(inner, path) => section_bytes(inner.raw_message(), inner, &Section { path, kind: section.kind.clone(), partial: None })?,
-            // HEADER and TEXT of an attached message mean that message's own.
-            Found::Part(MessagePart { body: PartType::Message(inner), .. }) if !matches!(section.kind, SectionKind::All | SectionKind::Mime) => section_bytes(inner.raw_message(), inner, &Section { path: Vec::new(), kind: section.kind.clone(), partial: None })?,
-            Found::Part(part) => {
-                let (header_start, body_start, end) = (part.offset_header as usize, part.offset_body as usize, part.offset_end as usize);
-                match &section.kind {
-                    SectionKind::All | SectionKind::Text => raw.get(body_start..end)?.to_vec(),
-                    SectionKind::Mime | SectionKind::Header => raw.get(header_start..body_start)?.to_vec(),
-                    SectionKind::HeaderFields { names, not } => filter_headers(raw.get(header_start..body_start)?, names, *not),
+            Found::Inside(inner, path) => section_bytes(inner.raw(), inner, &Section { path, kind: section.kind.clone(), partial: None })?,
+            Found::Part(part) => match (part.kind(), &section.kind) {
+                // HEADER and TEXT of an attached message mean that message's own.
+                (PartKind::Message(inner), SectionKind::Header | SectionKind::Text | SectionKind::HeaderFields { .. }) => {
+                    section_bytes(inner.raw(), inner, &Section { path: Vec::new(), kind: section.kind.clone(), partial: None })?
                 }
-            }
+                (_, SectionKind::All | SectionKind::Text) => part.raw_body().to_vec(),
+                (_, SectionKind::Mime | SectionKind::Header) => part.raw_headers().to_vec(),
+                (_, SectionKind::HeaderFields { names, not }) => filter_headers(part.raw_headers(), names, *not),
+            },
         }
     };
     Some(match section.partial {
@@ -405,7 +393,7 @@ mod tests {
     fn envelope_of_simple_message() {
         let msg = MessageParser::default().parse(SIMPLE).unwrap();
         let mut out = Vec::new();
-        envelope(&mut out, &msg);
+        envelope(&mut out, msg.root());
         assert_eq!(
             text(out),
             r#"("Mon, 05 Oct 2026 10:00:00 +0000" "Hi there" (("Alice" NIL "alice" "example.org")) (("Alice" NIL "alice" "example.org")) (("Alice" NIL "alice" "example.org")) ((NIL NIL "bob" "example.org")) NIL NIL NIL "<id1@example.org>")"#
@@ -416,17 +404,40 @@ mod tests {
     fn body_structures() {
         let msg = MessageParser::default().parse(SIMPLE).unwrap();
         let mut out = Vec::new();
-        body_structure(&mut out, &msg, SIMPLE, &msg.parts[0], false, 0);
+        body_structure(&mut out, msg.root_part(), false, 0);
         assert_eq!(text(out), r#"("TEXT" "PLAIN" NIL NIL NIL "7BIT" 14 2)"#);
 
         let msg = MessageParser::default().parse(MULTI).unwrap();
         let mut out = Vec::new();
-        body_structure(&mut out, &msg, MULTI, &msg.parts[0], true, 0);
+        body_structure(&mut out, msg.root_part(), true, 0);
         let structure = text(out);
         assert!(structure.starts_with(r#"(("TEXT" "PLAIN" ("charset" "utf-8") NIL NIL "7BIT" "#), "{structure}");
         assert!(structure.contains(r#"("APPLICATION" "PDF" ("name" "a.pdf") NIL NIL "BASE64" "#), "{structure}");
         assert!(structure.contains(r#"("ATTACHMENT" ("filename" "a.pdf"))"#), "{structure}");
         assert!(structure.ends_with(r#" "MIXED" ("boundary" "B") NIL NIL)"#), "{structure}");
+    }
+
+    /// Sections and the structure of a message attached in the clear and of one attached in base64,
+    /// whose parts' offsets refer to its decoded body rather than to the outer message.
+    #[test]
+    fn attached_messages() {
+        use base64::Engine;
+        let inner = "From: b@example.org\r\nSubject: Inner\r\nContent-Type: multipart/mixed; boundary=\"C\"\r\n\r\n--C\r\nContent-Type: text/plain\r\n\r\nfirst\r\n--C\r\nContent-Type: text/plain\r\n\r\nsecond\r\n--C--\r\n";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(inner);
+        for (encoding, body) in [("7bit", inner), ("base64", encoded.as_str())] {
+            let raw = format!("From: a@example.org\r\nContent-Type: multipart/mixed; boundary=\"B\"\r\n\r\n--B\r\nContent-Type: text/plain\r\n\r\nouter\r\n--B\r\nContent-Type: message/rfc822\r\nContent-Transfer-Encoding: {encoding}\r\n\r\n{body}\r\n--B--\r\n");
+            let msg = MessageParser::default().parse(raw.as_bytes()).unwrap();
+            let get = |spec: &str| text(section_bytes(raw.as_bytes(), msg.root(), &Section::parse(spec, "").unwrap()).unwrap());
+            assert_eq!(get("2.1").trim_end(), "first", "{encoding}");
+            assert_eq!(get("2.2").trim_end(), "second", "{encoding}");
+            assert_eq!(get("2.HEADER.FIELDS (SUBJECT)"), "Subject: Inner\r\n\r\n", "{encoding}");
+            assert!(get("2.TEXT").contains("second"), "{encoding}");
+            assert!(get("2.MIME").contains("message/rfc822"), "{encoding}");
+            assert_eq!(binary_bytes(raw.as_bytes(), msg.root(), &Section::parse("2.2", "").unwrap()).unwrap().unwrap().trim_ascii_end(), b"second", "{encoding}");
+            let mut out = Vec::new();
+            body_structure(&mut out, msg.root_part(), false, 0);
+            assert!(text(out).contains(r#""Inner""#), "{encoding}");
+        }
     }
 
     #[test]
@@ -445,7 +456,7 @@ mod tests {
     #[test]
     fn section_extraction() {
         let msg = MessageParser::default().parse(SIMPLE).unwrap();
-        let get = |spec: &str, partial: &str| text(section_bytes(SIMPLE, &msg, &Section::parse(spec, partial).unwrap()).unwrap());
+        let get = |spec: &str, partial: &str| text(section_bytes(SIMPLE, msg.root(), &Section::parse(spec, partial).unwrap()).unwrap());
         assert_eq!(get("", "").as_bytes(), SIMPLE);
         assert_eq!(get("TEXT", ""), "Hello\r\nWorld\r\n");
         assert!(get("HEADER", "").ends_with("Message-ID: <id1@example.org>\r\n\r\n"));
@@ -454,13 +465,13 @@ mod tests {
         assert_eq!(get("TEXT", "<2.5>"), "llo\r\n");
         assert_eq!(get("TEXT", "<500.5>"), "");
         assert_eq!(get("1", ""), "Hello\r\nWorld\r\n");
-        assert!(section_bytes(SIMPLE, &msg, &Section::parse("2", "").unwrap()).is_none());
+        assert!(section_bytes(SIMPLE, msg.root(), &Section::parse("2", "").unwrap()).is_none());
 
         let msg = MessageParser::default().parse(MULTI).unwrap();
-        let get = |spec: &str| text(section_bytes(MULTI, &msg, &Section::parse(spec, "").unwrap()).unwrap());
+        let get = |spec: &str| text(section_bytes(MULTI, msg.root(), &Section::parse(spec, "").unwrap()).unwrap());
         assert_eq!(get("1").trim_end(), "Body text");
         assert_eq!(get("2").trim_end(), "QUJD");
         assert!(get("2.MIME").contains("Content-Disposition: attachment"));
-        assert!(section_bytes(MULTI, &msg, &Section::parse("3", "").unwrap()).is_none());
+        assert!(section_bytes(MULTI, msg.root(), &Section::parse("3", "").unwrap()).is_none());
     }
 }

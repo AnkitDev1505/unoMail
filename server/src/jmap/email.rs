@@ -1,7 +1,7 @@
 //! JMAP Email, Thread, Identity and EmailSubmission methods.
 
 use mail_builder::{MessageBuilder, headers::address::Address as BuilderAddress};
-use mail_parser::{MessageParser, MimeHeaders, PartType};
+use mail_parser::{MessageParser, PartKind};
 use serde_json::{Map, Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -43,18 +43,18 @@ fn keywords_json(message: &Message) -> Value {
     Value::Object(map)
 }
 
-fn addresses(list: Option<&mail_parser::Address<'_>>) -> Value {
+fn addresses(list: Option<mail_parser::AddressList<'_>>) -> Value {
     match list {
         Some(list) => Value::Array(
-            list.iter().filter_map(|a| a.address().map(|email| json!({ "name": a.name(), "email": email }))).collect(),
+            list.mailboxes().filter_map(|a| a.address().map(|email| json!({ "name": a.name(), "email": email }))).collect(),
         ),
         None => Value::Null,
     }
 }
 
-fn id_list(value: &mail_parser::HeaderValue<'_>) -> Value {
-    match value.as_text_list() {
-        Some(list) if !list.is_empty() => json!(list),
+fn id_list(list: Option<mail_parser::TextList<'_>>) -> Value {
+    match list {
+        Some(list) if !list.is_empty() => json!(list.iter().collect::<Vec<_>>()),
         _ => Value::Null,
     }
 }
@@ -90,14 +90,16 @@ fn add_body(out: &mut Map<String, Value>, message: &Message, raw: &[u8], hostnam
     out.insert("receiptAutomaticAllowed".into(), Value::Bool(super::mdn::requested_by_return_path(raw)));
 
     let mut body_values = Map::new();
-    let describe = |index: usize, values: &mut Map<String, Value>| -> Option<Value> {
-        let part = parsed.parts.get(index)?;
-        let (text, kind) = match &part.body {
-            PartType::Text(text) => (text.as_ref(), "text/plain"),
-            PartType::Html(html) => (html.as_ref(), "text/html"),
+    let numbers = crate::mime::part_numbers(&parsed);
+    let describe = |part: mail_parser::MessagePart<'_>, values: &mut Map<String, Value>| -> Option<Value> {
+        let index = *numbers.get(&part.id())?;
+        let kind = match part.kind() {
+            PartKind::Text => "text/plain",
+            PartKind::Html => "text/html",
             _ => return None,
         };
-        values.insert(index.to_string(), json!({ "value": text, "isEncodingProblem": part.is_encoding_problem, "isTruncated": false }));
+        let (text, problems) = part.text_checked()?;
+        values.insert(index.to_string(), json!({ "value": text, "isEncodingProblem": !problems.is_empty(), "isTruncated": false }));
         Some(json!({
             "partId": index.to_string(),
             "blobId": format!("{}.{}", message.blob_hash, index),
@@ -106,8 +108,8 @@ fn add_body(out: &mut Map<String, Value>, message: &Message, raw: &[u8], hostnam
             "charset": "utf-8",
         }))
     };
-    let text_body: Vec<Value> = parsed.text_body.iter().filter_map(|i| describe(*i as usize, &mut body_values)).collect();
-    let html_body: Vec<Value> = parsed.html_body.iter().filter_map(|i| describe(*i as usize, &mut body_values)).collect();
+    let text_body: Vec<Value> = parsed.text_body().filter_map(|part| describe(part, &mut body_values)).collect();
+    let html_body: Vec<Value> = parsed.html_body().filter_map(|part| describe(part, &mut body_values)).collect();
     let attachments = crate::search::attachment_values(&parsed, &message.blob_hash);
     out.insert("textBody".into(), Value::Array(text_body));
     out.insert("htmlBody".into(), Value::Array(html_body));
@@ -724,9 +726,9 @@ pub async fn load_blob(app: &AppState, account: &Account, blob_id: &str) -> Resu
     // Parts are numbered in the message as shown, which for S/MIME is the decrypted one.
     let (raw, _) = crate::smime::view(app, account.id, raw).await;
     let Some(parsed) = MessageParser::default().parse(&raw) else { return Ok(None) };
-    let Some(part) = parsed.parts.get(index) else { return Ok(None) };
-    let content_type = part_type(part, "application/octet-stream");
-    Ok(Some((part.contents().to_vec(), content_type)))
+    let Some(part) = parsed.root().parts().nth(index) else { return Ok(None) };
+    let content_type = part_type(&part, "application/octet-stream");
+    Ok(Some((part.decoded().into_owned(), content_type)))
 }
 
 /// Builds an RFC 5322 message from a JMAP Email object.
@@ -1171,7 +1173,7 @@ pub(super) async fn prepare_email(ctx: &Context<'_>, message_id: i64) -> Result<
     }
     let mut recipients: Vec<Address> = Vec::new();
     for list in [parsed.to(), parsed.cc(), parsed.bcc()].into_iter().flatten() {
-        for entry in list.iter() {
+        for entry in list.mailboxes() {
             let address = entry.address().and_then(Address::parse).ok_or_else(|| set_error("invalidRecipients", "the message has an invalid recipient address"))?;
             if !recipients.contains(&address) {
                 recipients.push(address);

@@ -6,7 +6,7 @@
 //! (they need SMTPUTF8), and neither can an attached message (message/rfc822 must not be
 //! encoded): such mail cannot be converted.
 
-use mail_parser::{MessageParser, PartType};
+use mail_parser::{MessageParser, PartKind};
 
 /// The message in 7-bit form, or `None` when it cannot be converted.
 pub fn downconvert(raw: &[u8]) -> Option<Vec<u8>> {
@@ -17,10 +17,10 @@ pub fn downconvert(raw: &[u8]) -> Option<Vec<u8>> {
     // (header start, body start, body end) of each part to convert, last first, so that
     // splicing one does not move the others.
     let mut leaves: Vec<(usize, usize, usize)> = message
-        .parts
-        .iter()
-        .filter(|part| matches!(part.body, PartType::Text(_) | PartType::Html(_) | PartType::Binary(_) | PartType::InlineBinary(_)))
-        .map(|part| (part.offset_header as usize, part.offset_body as usize, part.offset_end as usize))
+        .root()
+        .parts()
+        .filter(|part| matches!(part.kind(), PartKind::Text | PartKind::Html | PartKind::Binary | PartKind::InlineBinary))
+        .map(|part| (part.offset_header() as usize, part.offset_body() as usize, part.offset_end() as usize))
         .filter(|(header, body, end)| header <= body && body <= end && *end <= raw.len() && !raw[*body..*end].is_ascii())
         .collect();
     leaves.sort_by_key(|leaf| std::cmp::Reverse(leaf.0));

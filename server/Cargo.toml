@@ -21,6 +21,7 @@ cms = { version = "0.2.3", features = ["builder"] }
 der = "0.7.10"
 flate2 = "1.1.10"
 futures-util = "0.3.34"
+hashify = "0.2"
 hex = "0.4.3"
 hickory-resolver = "0.26.3"
 http-body-util = "0.1.5"
@@ -30,12 +31,12 @@ idna = "1.1.0"
 instant-acme = { version = "0.8.5", default-features = false, features = ["ring", "hyper-rustls", "rcgen"] }
 ipnet = "2.12.2"
 ldap3 = { version = "0.12.1", default-features = false, features = ["tls-rustls-ring"] }
-mail-auth = { version = "0.13.3", default-features = false, features = ["arc", "dns-hickory", "report", "ring"] }
-mail-builder = "1.0.0"
-mail-parser = "0.11.9"
+mail-auth = { version = "0.15.1", default-features = false, features = ["arc", "dns-hickory", "aws-lc-rs"] }
+mail-builder = "2.0.1"
+mail-parser = "1.0.1"
 mime = "0.3.17"
 p12-keystore = "0.4.1"
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 pgp = { version = "0.21.0", default-features = false }
 quick-xml = "0.42.0"
 rand = "0.8.6"
@@ -54,7 +55,7 @@ sha1 = "0.10"
 sha2 = "0.10"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 subtle = "2.6.1"
-sysinfo = { version = "0.39.6", default-features = false, features = ["system", "disk"] }
+sysinfo = { version = "0.40.1", default-features = false, features = ["system", "disk"] }
 thiserror = "2.0.21"
 time = { version = "0.3.55", features = ["formatting", "parsing", "macros", "serde"] }
 tokio = { version = "1.53.2", features = ["full"] }

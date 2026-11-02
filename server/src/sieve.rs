@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use mail_parser::{MessageParser, MimeHeaders};
+use mail_parser::{MessageParser, PartKind};
 
 use crate::{security::authn::find_header_end, util::Address};
 
@@ -1747,8 +1747,8 @@ fn index_headers(raw: &[u8]) -> (HashMap<String, Vec<String>>, HashMap<String, V
     let mut headers: HashMap<String, Vec<String>> = HashMap::new();
     let mut addresses: HashMap<String, Vec<String>> = HashMap::new();
     if let Some(message) = MessageParser::default().parse_headers(raw) {
-        for (name, value) in message.headers_raw() {
-            headers.entry(name.to_ascii_lowercase()).or_default().push(unfold(value));
+        for header in message.headers().iter() {
+            headers.entry(header.raw_name().to_ascii_lowercase()).or_default().push(unfold(&String::from_utf8_lossy(header.raw_value())));
         }
         // Decoded forms, so that tests see the text users see.
         // They are kept apart: they widen a search, but are not further header fields to count.
@@ -1757,14 +1757,14 @@ fn index_headers(raw: &[u8]) -> (HashMap<String, Vec<String>>, HashMap<String, V
         }
         for (name, list) in [("from", message.from()), ("to", message.to()), ("cc", message.cc()), ("bcc", message.bcc()), ("sender", message.sender()), ("reply-to", message.reply_to())] {
             if let Some(list) = list {
-                addresses.insert(name.into(), list.iter().filter_map(|a| a.address()).map(str::to_lowercase).collect());
-                let names: Vec<String> = list.iter().filter_map(|a| a.name()).map(str::to_owned).collect();
+                addresses.insert(name.into(), list.mailboxes().filter_map(|a| a.address()).map(str::to_lowercase).collect());
+                let names: Vec<String> = list.mailboxes().filter_map(|a| a.name()).map(str::to_owned).collect();
                 headers.entry(decoded_key(name)).or_default().extend(names);
             }
         }
         for (name, field) in [("resent-from", "Resent-From"), ("resent-to", "Resent-To"), ("resent-cc", "Resent-Cc")] {
-            if let Some(list) = message.header(field).and_then(mail_parser::HeaderValue::as_address) {
-                addresses.insert(name.into(), list.iter().filter_map(|a| a.address()).map(str::to_lowercase).collect());
+            if let Some(list) = message.headers().value(field).and_then(|value| value.as_address()) {
+                addresses.insert(name.into(), list.mailboxes().filter_map(|a| a.address()).map(str::to_lowercase).collect());
             }
         }
     }
@@ -1797,13 +1797,13 @@ fn body_parts(raw: &[u8]) -> Option<Vec<BodyPart>> {
     let message = MessageParser::default().parse(raw)?;
     Some(
         message
-            .parts
-            .iter()
+            .root()
+            .parts()
             .take(MAX_PARTS)
-            .filter(|part| !matches!(part.body, mail_parser::PartType::Multipart(_) | mail_parser::PartType::Message(_)))
+            .filter(|part| !matches!(part.kind(), PartKind::Multipart | PartKind::Message(_)))
             .map(|part| {
                 let (ctype, subtype) = part.content_type().map_or(("text".to_owned(), "plain".to_owned()), |ct| (ct.ctype().to_ascii_lowercase(), ct.subtype().unwrap_or("").to_ascii_lowercase()));
-                BodyPart { ctype, subtype, text: part.text_contents().map_or_else(|| String::from_utf8_lossy(part.contents()).into_owned(), str::to_owned) }
+                BodyPart { ctype, subtype, text: part.text().map_or_else(|| String::from_utf8_lossy(&part.decoded()).into_owned(), |text| text.into_owned()) }
             })
             .collect(),
     )
@@ -1812,29 +1812,26 @@ fn body_parts(raw: &[u8]) -> Option<Vec<BodyPart>> {
 /// The MIME parts in depth-first order; part 0 is the message itself.
 fn mime_parts(raw: &[u8]) -> Vec<MimePart> {
     let Some(message) = MessageParser::default().parse(raw) else { return vec![MimePart::default()] };
-    let source = message.raw_message();
+    let numbers = crate::mime::part_numbers(&message);
     let mut parts = Vec::new();
-    for part in message.parts.iter().take(MAX_PARTS) {
+    for part in message.root().parts().take(MAX_PARTS) {
         let headers = part
-            .headers
+            .headers()
             .iter()
-            .map(|h| (h.name.as_str().to_owned(), unfold(&String::from_utf8_lossy(source.get(h.offset_start as usize..h.offset_end as usize).unwrap_or_default()))))
+            .map(|h| (h.name().as_str().to_owned(), unfold(&String::from_utf8_lossy(h.raw_value()))))
             .collect();
         let (ctype, subtype, params) = match part.content_type() {
             Some(ct) => (
                 ct.ctype().to_ascii_lowercase(),
                 ct.subtype().unwrap_or_default().to_ascii_lowercase(),
-                ct.attributes().map(|attrs| attrs.iter().map(|a| (a.name.to_ascii_lowercase(), a.value.to_string())).collect()).unwrap_or_default(),
+                ct.attributes().map(|(name, value)| (name.to_ascii_lowercase(), value.to_string())).collect(),
             ),
             None => ("text".to_owned(), "plain".to_owned(), Vec::new()),
         };
-        let children = match &part.body {
-            mail_parser::PartType::Multipart(children) => children.iter().map(|&c| c as usize).filter(|&c| c < MAX_PARTS).collect(),
-            _ => Vec::new(),
-        };
-        let text = match &part.body {
-            mail_parser::PartType::Text(text) => Some(text.to_string()),
-            mail_parser::PartType::Html(html) => Some(mail_parser::decoders::html::html_to_text(html)),
+        let children = part.children().filter_map(|child| numbers.get(&child.id()).copied()).filter(|&child| child < MAX_PARTS).collect();
+        let text = match part.kind() {
+            PartKind::Text => part.text().map(|text| text.into_owned()),
+            PartKind::Html => part.text().map(|html| mail_parser::decoders::html::html_to_text(&html)),
             _ => None,
         };
         parts.push(MimePart { headers, ctype, subtype, params, text, children });

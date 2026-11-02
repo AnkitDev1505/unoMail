@@ -16,7 +16,7 @@ fn observation(disposition: &'static str, dkim: &'static str) -> DmarcObservatio
         spf_domain: "bounces.sender.example".into(),
         spf_result: "softfail".into(),
         override_reason: None,
-        policy: serde_json::to_string(&mail_auth::report::PolicyPublished::from_record("sender.example", &mail_auth::common::parse::TxtRecordParser::parse(b"v=DMARC1; p=reject; rua=mailto:dmarc@sender.example").unwrap())).unwrap(),
+        policy: serde_json::to_string(&unomail::mail_report::PolicyPublished { domain: "sender.example".into(), p: unomail::mail_report::Disposition::Reject, ..Default::default() }).unwrap(),
         rua: vec!["mailto:dmarc@sender.example".into()],
     }
 }

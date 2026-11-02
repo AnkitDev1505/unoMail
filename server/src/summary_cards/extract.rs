@@ -233,7 +233,7 @@ fn walk(value: &Value, path: &str, depth: usize, result: &mut Vec<Extracted>) {
 pub fn structured(raw: &[u8]) -> Vec<Extracted> {
     let mut result = Vec::new();
     let Some(message) = MessageParser::default().parse(raw) else { return result };
-    for part in 0..message.html_body.len().min(5) {
+    for part in 0..message.html_body().len().min(5) {
         let Some(html) = message.body_html(part) else { continue };
         if html.len() > 1024 * 1024 { continue; }
         for (script, capture) in SCRIPTS.captures_iter(&html).take(20).enumerate() {
@@ -306,7 +306,7 @@ pub fn validate_card(card: Card) -> Result<Card, String> {
 pub fn source_urls(raw: &[u8]) -> Vec<String> {
     let Some(message) = MessageParser::default().parse(raw) else { return vec![] };
     let mut urls = Vec::new();
-    for text in (0..message.text_body.len()).filter_map(|i| message.body_text(i)).chain((0..message.html_body.len()).filter_map(|i| message.body_html(i))) {
+    for text in (0..message.text_body().len()).filter_map(|i| message.body_text(i)).chain((0..message.html_body().len()).filter_map(|i| message.body_html(i))) {
         for found in URLS.find_iter(&text).take(100) {
             if let Some(url) = safe_url(&found.as_str().replace("&amp;", "&")) && !urls.contains(&url) { urls.push(url); }
             if urls.len() >= 50 { return urls; }

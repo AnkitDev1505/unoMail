@@ -2,7 +2,7 @@
 
 use std::net::IpAddr;
 
-use mail_auth::{IpLookupStrategy, MX, MessageAuthenticator, RecordSet, common::cache::NoCache};
+use mail_auth::{IpLookupStrategy, MessageAuthenticator, NoCache};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DnsError {
@@ -50,7 +50,7 @@ pub async fn mx(resolver: &MessageAuthenticator, domain: &str) -> Result<Vec<(u1
 /// Hosts of equal preference come in random order, so that senders spread over them
 /// (RFC 5321 5.1).
 pub async fn mail_exchangers(resolver: &MessageAuthenticator, domain: &str) -> Result<Option<Vec<(u16, String)>>, DnsError> {
-    let records = match resolver.mx_lookup(domain, None::<&NoCache<Box<str>, RecordSet<MX>>>).await {
+    let records = match resolver.mx_lookup(domain, None::<&NoCache>).await {
         Ok(records) => records,
         Err(mail_auth::Error::Dns(mail_auth::DnsError::RecordNotFound(code))) if u16::from(code) == NXDOMAIN => return Ok(None),
         Err(err) => {
@@ -61,7 +61,7 @@ pub async fn mail_exchangers(resolver: &MessageAuthenticator, domain: &str) -> R
         }
     };
     let mut hosts = Vec::new();
-    for record in records.rrset.iter() {
+    for record in records.records.iter() {
         for exchange in record.exchanges.iter() {
             hosts.push((record.preference, exchange.trim_end_matches('.').to_ascii_lowercase()));
         }
@@ -80,8 +80,8 @@ pub async fn ips(resolver: &MessageAuthenticator, host: &str) -> Result<Vec<IpAd
             host,
             IpLookupStrategy::Ipv4thenIpv6,
             8,
-            None::<&NoCache<Box<str>, RecordSet<std::net::Ipv4Addr>>>,
-            None::<&NoCache<Box<str>, RecordSet<std::net::Ipv6Addr>>>,
+            None::<&NoCache>,
+            None::<&NoCache>,
         )
         .await
         .map_err(map_err)
@@ -91,7 +91,7 @@ pub async fn ips(resolver: &MessageAuthenticator, host: &str) -> Result<Vec<IpAd
 /// are any; a server that sends over both needs both checked.
 pub async fn all_ips(resolver: &MessageAuthenticator, host: &str) -> Result<Vec<IpAddr>, DnsError> {
     let lookup = |strategy| {
-        resolver.ip_lookup(host, strategy, 8, None::<&NoCache<Box<str>, RecordSet<std::net::Ipv4Addr>>>, None::<&NoCache<Box<str>, RecordSet<std::net::Ipv6Addr>>>)
+        resolver.ip_lookup(host, strategy, 8, None::<&NoCache>, None::<&NoCache>)
     };
     let (v4, v6) = tokio::join!(lookup(IpLookupStrategy::Ipv4Only), lookup(IpLookupStrategy::Ipv6Only));
     match (v4.map_err(map_err), v6.map_err(map_err)) {
@@ -101,8 +101,8 @@ pub async fn all_ips(resolver: &MessageAuthenticator, host: &str) -> Result<Vec<
 }
 
 pub async fn ptr(resolver: &MessageAuthenticator, ip: IpAddr) -> Result<Vec<String>, DnsError> {
-    let records = resolver.ptr_lookup(ip, None::<&NoCache<IpAddr, RecordSet<Box<str>>>>).await.map_err(map_err)?;
-    Ok(records.rrset.iter().map(|name| name.trim_end_matches('.').to_ascii_lowercase()).collect())
+    let records = resolver.ptr_lookup(ip, None::<&NoCache>).await.map_err(map_err)?;
+    Ok(records.records.iter().map(|name| name.trim_end_matches('.').to_ascii_lowercase()).collect())
 }
 
 /// All TXT strings published at `name`, each record's character-strings concatenated.

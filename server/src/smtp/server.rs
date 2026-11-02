@@ -149,7 +149,7 @@ impl Session {
             (Some(authenticator), Some((_, domain))) => {
                 let helo = self.helo.as_deref().unwrap_or(domain);
                 let spf = authenticator
-                    .verify_spf(mail_auth::spf::verify::SpfParameters::verify_mail_from(self.peer.ip(), helo, &self.app.cfg.hostname, sender))
+                    .verify_spf(mail_auth::spf::verify::SpfParameters::mail_from(self.peer.ip(), helo, &self.app.cfg.hostname, sender))
                     .await;
                 (spf.result() == mail_auth::SpfResult::Pass).then(|| domain.to_owned())
             }

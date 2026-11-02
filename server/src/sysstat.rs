@@ -76,18 +76,18 @@ fn disk_space(path: &Path) -> (u64, u64) {
         Some(plain) => std::path::PathBuf::from(plain),
         None => path,
     };
-    let disks = Disks::new_with_refreshed_list();
+    let Ok(disks) = Disks::new_with_refreshed_list() else { return (0, 0) };
     disks
-        .list()
         .iter()
         .filter(|disk| path.starts_with(disk.mount_point()))
         .max_by_key(|disk| disk.mount_point().as_os_str().len())
         .map_or((0, 0), |disk| (disk.available_space(), disk.total_space()))
 }
 
-/// Reads the current state of the host. Blocking; call from a blocking task.
-pub fn measure(data_dir: &Path) -> Sample {
-    let mut system = System::new_with_specifics(RefreshKind::nothing().with_memory(MemoryRefreshKind::nothing().with_ram()));
+/// Reads the current state of the host, or `None` when the platform cannot report it. Blocking;
+/// call from a blocking task.
+pub fn measure(data_dir: &Path) -> Option<Sample> {
+    let mut system = System::new_with_specifics(RefreshKind::nothing().with_memory(MemoryRefreshKind::nothing().with_ram())).ok()?;
     let pid = Pid::from_u32(std::process::id());
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().with_memory());
     let (disk_free, disk_total) = disk_space(data_dir);
@@ -108,7 +108,7 @@ pub fn measure(data_dir: &Path) -> Sample {
     let named: u64 = services.values().sum();
     services.insert("other", mem_used.saturating_sub(named));
     let services: serde_json::Map<String, serde_json::Value> = SERVICES.iter().map(|name| (name.to_string(), clamp(services.get(name).copied().unwrap_or(0)).into())).collect();
-    Sample {
+    Some(Sample {
         ts: now(),
         disk_free: clamp(disk_free),
         disk_total: clamp(disk_total),
@@ -116,12 +116,12 @@ pub fn measure(data_dir: &Path) -> Sample {
         mem_total: clamp(mem_total),
         process: clamp(system.process(pid).map_or(0, |process| process.memory())),
         services: Some(serde_json::Value::Object(services).to_string()),
-    }
+    })
 }
 
 pub async fn record(app: &App) -> Option<Sample> {
     let data_dir = app.cfg.data_dir.clone();
-    let sample = tokio::task::spawn_blocking(move || measure(&data_dir)).await.ok()?;
+    let sample = tokio::task::spawn_blocking(move || measure(&data_dir)).await.ok()??;
     let stored = sqlx::query("INSERT OR REPLACE INTO system_samples (ts, disk_free, disk_total, mem_used, mem_total, process, services) VALUES (?, ?, ?, ?, ?, ?, ?)")
         .bind(sample.ts)
         .bind(sample.disk_free)
@@ -171,7 +171,7 @@ mod tests {
     #[test]
     fn the_host_can_be_measured() {
         let dir = tempfile::tempdir().unwrap();
-        let sample = measure(dir.path());
+        let sample = measure(dir.path()).unwrap();
         assert!(sample.mem_total > 0 && sample.mem_used > 0 && sample.mem_used <= sample.mem_total, "{sample:?}");
         assert!(sample.disk_total > 0 && sample.disk_free <= sample.disk_total, "{sample:?}");
         assert!(sample.process > 0, "{sample:?}");

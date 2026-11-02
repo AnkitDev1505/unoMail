@@ -1,6 +1,6 @@
 # Development
 
-Requirements: Rust (stable), Node 24 with pnpm, Docker.
+Requirements: Rust (stable), Node 26 with pnpm, Docker. On Windows, also CMake and NASM (for aws-lc-rs, the DKIM crypto backend).
 
 ## Tests
 

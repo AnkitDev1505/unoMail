@@ -1,7 +1,7 @@
 //! Out-of-office autoreplies (RFC 3834 behaviour): date ranges, per-sender deduplication and
 //! strict loop avoidance.
 
-use mail_parser::{HeaderValue, MessageParser};
+use mail_parser::MessageParser;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -108,7 +108,7 @@ pub fn should_reply(sender: &str, recipient: &str, raw: &[u8]) -> bool {
         return false;
     }
     let Some(message) = MessageParser::default().parse_headers(raw) else { return false };
-    let text = |name: &'static str| message.header_raw(name).map(|v| v.trim().to_ascii_lowercase());
+    let text = |name: &'static str| crate::mime::raw_header(message.headers(), name).map(|v| v.trim().to_ascii_lowercase());
     if text("Auto-Submitted").is_some_and(|v| v != "no") {
         return false;
     }
@@ -116,17 +116,17 @@ pub fn should_reply(sender: &str, recipient: &str, raw: &[u8]) -> bool {
         return false;
     }
     for header in ["List-Id", "List-Unsubscribe", "List-Post", "X-Auto-Response-Suppress", "X-Autoreply", "X-Autorespond", "Feedback-ID"] {
-        if message.header_raw(header).is_some() {
+        if message.headers().contains(header) {
             return false;
         }
     }
-    if matches!(message.return_path(), HeaderValue::Text(path) if path.trim().is_empty() || path.trim() == "<>") {
+    if text("Return-Path").is_some_and(|path| path.is_empty() || path == "<>") {
         return false;
     }
     // Only answer mail that names the user as a visible recipient.
     let recipient = recipient.to_ascii_lowercase();
     let plain = recipient.split_once('@').map(|(local, domain)| format!("{}@{domain}", local.split('+').next().unwrap_or(local)));
-    [message.to(), message.cc()].into_iter().flatten().flat_map(|list| list.iter()).filter_map(|a| a.address()).any(|address| {
+    [message.to(), message.cc()].into_iter().flatten().flat_map(|list| list.mailboxes()).filter_map(|a| a.address()).any(|address| {
         let address = address.to_ascii_lowercase();
         address == recipient || plain.as_deref() == Some(address.as_str())
     })

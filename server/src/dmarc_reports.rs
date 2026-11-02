@@ -3,7 +3,7 @@
 
 use std::io::Read;
 
-use mail_auth::report::{ActionDisposition, DmarcResult, Report};
+use crate::mail_report::{ActionDisposition, DmarcResult, Report};
 use serde::Serialize;
 
 use crate::{app::App, smtp::delivery::is_local_domain, util::{normalize_domain, now}};

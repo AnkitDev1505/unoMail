@@ -295,7 +295,7 @@ async fn spf_verdicts(resolver: &MessageAuthenticator, hostname: &str, domain: &
     let sender = format!("postmaster@{domain}");
     let mut verdicts = Vec::with_capacity(ips.len());
     for ip in ips {
-        let output = resolver.verify_spf(SpfParameters::verify_mail_from(*ip, hostname, hostname, &sender)).await;
+        let output = resolver.verify_spf(SpfParameters::mail_from(*ip, hostname, hostname, &sender)).await;
         verdicts.push((*ip, output.result()));
     }
     verdicts

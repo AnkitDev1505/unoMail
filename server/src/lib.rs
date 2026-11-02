@@ -30,6 +30,8 @@ pub mod jmap;
 pub mod ldap;
 pub mod lists;
 pub mod logstream;
+pub mod mail_report;
+pub mod mime;
 pub mod managesieve;
 pub mod masked_email;
 pub mod milter;

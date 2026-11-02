@@ -6,7 +6,7 @@
 //! SQLite FTS5 table. Messages stored before the index existed are indexed in the background;
 //! until then searches fall back to the summary columns for them.
 
-use mail_parser::{MessageParser, MimeHeaders};
+use mail_parser::MessageParser;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 
@@ -33,19 +33,18 @@ pub struct Indexed {
     pub names: String,
 }
 
-fn addresses(list: Option<&mail_parser::Address<'_>>) -> String {
-    list.map(|list| list.iter().map(|a| format!("{} {}", a.name().unwrap_or(""), a.address().unwrap_or(""))).collect::<Vec<_>>().join(", ")).unwrap_or_default()
+fn addresses(list: Option<mail_parser::AddressList<'_>>) -> String {
+    list.map(|list| list.mailboxes().map(|a| format!("{} {}", a.name().unwrap_or(""), a.address().unwrap_or(""))).collect::<Vec<_>>().join(", ")).unwrap_or_default()
 }
 
 /// The attachments of a parsed message as JMAP reports them. `hash` names the message's blob;
 /// each part is reachable as `<hash>.<part>`.
 pub fn attachment_values(parsed: &mail_parser::Message<'_>, hash: &str) -> Vec<Value> {
+    let numbers = crate::mime::part_numbers(parsed);
     parsed
-        .attachments
-        .iter()
-        .filter_map(|i| {
-            let index = *i as usize;
-            let part = parsed.parts.get(index)?;
+        .attachments()
+        .filter_map(|part| {
+            let index = *numbers.get(&part.id())?;
             let kind = part.content_type().map(|ct| match ct.subtype() {
                 Some(sub) => format!("{}/{}", ct.ctype(), sub).to_ascii_lowercase(),
                 None => ct.ctype().to_ascii_lowercase(),
@@ -53,7 +52,7 @@ pub fn attachment_values(parsed: &mail_parser::Message<'_>, hash: &str) -> Vec<V
             Some(json!({
                 "partId": index.to_string(),
                 "blobId": format!("{hash}.{index}"),
-                "size": part.len(),
+                "size": part.decoded_len(),
                 "name": part.attachment_name(),
                 "type": kind.unwrap_or_else(|| "application/octet-stream".into()),
                 "disposition": if part.content_disposition().is_some_and(|d| d.is_inline()) { "inline" } else { "attachment" },
@@ -66,7 +65,7 @@ pub fn attachment_values(parsed: &mail_parser::Message<'_>, hash: &str) -> Vec<V
 pub fn extract(raw: &[u8], hash: &str) -> Indexed {
     let Some(message) = MessageParser::default().parse(raw) else { return Indexed::default() };
     let mut body = String::new();
-    for index in 0..message.text_body.len() {
+    for index in 0..message.text_body().len() {
         if let Some(text) = message.body_text(index) {
             body.push_str(&text);
             body.push('\n');
@@ -77,7 +76,7 @@ pub fn extract(raw: &[u8], hash: &str) -> Indexed {
     }
     // A message with only an HTML part: its text, as mail-parser renders it.
     if body.trim().is_empty() {
-        for index in 0..message.html_body.len() {
+        for index in 0..message.html_body().len() {
             if let Some(text) = message.body_text(index) {
                 body.push_str(&text);
             }

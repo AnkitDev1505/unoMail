@@ -261,7 +261,7 @@ MIME-Version: 1.0\r\nContent-Type: application/gzip; name=\"report.xml.gz\"\r\nC
 
 #[tokio::test]
 async fn feedback_reports_are_stored_and_failure_reports_sent_when_enabled() {
-    use mail_auth::report::{Feedback, FeedbackType};
+    use unomail::mail_report::{Feedback, FeedbackType};
     use unomail::security::feedback::{Kind, PendingReport};
     let (env, api) = admin_env().await;
 

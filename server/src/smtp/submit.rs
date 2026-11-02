@@ -364,7 +364,7 @@ pub async fn accept_inbound(app: &App, msg: Inbound<'_>) -> Outcome {
     // The server's own tests, and what spam traps teach.
     let trapped = msg.recipients.iter().any(|(_, targets)| targets.contains(&Target::Trap));
     if (rt.native_filter || trapped) && !is_trusted_source(&app.cfg, msg.ip) && !msg.trusted_relay {
-        let author = if author_verified { MessageParser::default().parse_headers(&stripped).and_then(|m| m.from()?.first()?.address.as_deref().and_then(Address::parse)).map(|a| a.domain) } else { None };
+        let author = if author_verified { MessageParser::default().parse_headers(&stripped).and_then(|m| m.from()?.first()?.address().and_then(Address::parse)).map(|a| a.domain) } else { None };
         let envelope = if sender_verified { Address::parse(msg.sender).map(|a| a.domain) } else { None };
         let verified_domain = author.or(envelope);
         let mut assessment = filter::assess(app, &filter::Sender { ip: msg.ip, verified_domain: verified_domain.as_deref() }, &stripped).await;
@@ -521,11 +521,10 @@ pub async fn accept_inbound(app: &App, msg: Inbound<'_>) -> Outcome {
     // (reporters sign their mail), and not without limit: otherwise anyone could fill the
     // dashboard with made-up results.
     if author_verified && !junk {
-        let author_domain = MessageParser::default().parse_headers(&stripped).and_then(|m| m.from()?.first()?.address.as_deref().and_then(Address::parse)).map(|a| a.domain);
+        let author_domain = MessageParser::default().parse_headers(&stripped).and_then(|m| m.from()?.first()?.address().and_then(Address::parse)).map(|a| a.domain);
         // Only what can be a report counts against a domain's daily allowance of them.
         let may_be_report = {
-            use mail_parser::MimeHeaders;
-            MessageParser::default().parse_headers(&stripped).is_some_and(|m| m.parts.first().and_then(|part| part.content_type()).is_some_and(|ct| !ct.ctype().eq_ignore_ascii_case("text") && !ct.subtype().is_some_and(|s| s.eq_ignore_ascii_case("alternative"))))
+            MessageParser::default().parse_headers(&stripped).is_some_and(|m| m.content_type().is_some_and(|ct| !ct.ctype().eq_ignore_ascii_case("text") && !ct.subtype().is_some_and(|s| s.eq_ignore_ascii_case("alternative"))))
         };
         if may_be_report
             && let Some(domain) = author_domain
@@ -696,7 +695,7 @@ pub async fn submit(app: &App, sub: Submission<'_>) -> Outcome {
         return Outcome::Rejected("550 5.6.0 Message must have exactly one From header (and at most one Sender header)".into());
     }
     let from_addresses: Vec<Address> =
-        parsed.from().map(|f| f.iter().filter_map(|a| a.address()).filter_map(Address::parse).collect()).unwrap_or_default();
+        parsed.from().map(|f| f.mailboxes().filter_map(|a| a.address()).filter_map(Address::parse).collect()).unwrap_or_default();
     if from_addresses.is_empty() {
         return Outcome::Rejected("550 5.6.0 Message must have a valid From header".into());
     }

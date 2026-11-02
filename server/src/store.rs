@@ -164,13 +164,11 @@ pub fn parse_metadata(raw: &[u8]) -> Parsed {
     let Some(msg) = MessageParser::default().parse(raw) else {
         return Parsed::default();
     };
-    let ids = |v: &mail_parser::HeaderValue| -> Vec<String> {
-        v.as_text_list().map(|l| l.iter().map(|s| clip(s, 500)).collect()).unwrap_or_default()
-    };
+    let ids = |list: Option<mail_parser::TextList>| -> Vec<String> { list.map(|l| l.iter().map(|s| clip(s, 500)).collect()).unwrap_or_default() };
     let from = msg.from().and_then(|a| a.first());
     let to = msg
         .to()
-        .map(|a| a.iter().filter_map(|x| x.address()).map(|s| clip(s, 320)).collect::<Vec<_>>().join(", "))
+        .map(|a| a.mailboxes().filter_map(|x| x.address()).collect::<Vec<_>>().into_iter().map(|s| clip(s, 320)).collect::<Vec<_>>().join(", "))
         .unwrap_or_default();
     let snippet = msg.body_preview(200).map(|s| s.split_whitespace().collect::<Vec<_>>().join(" ")).unwrap_or_default();
     Parsed {
@@ -182,7 +180,7 @@ pub fn parse_metadata(raw: &[u8]) -> Parsed {
         from_name: from.and_then(|a| a.name()).map(|s| clip(s, 200)).unwrap_or_default(),
         to_addrs: clip(&to, 2000),
         snippet: clip(&snippet, 200),
-        has_attachments: msg.attachment_count() > 0,
+        has_attachments: msg.attachments().len() > 0,
         sent_date: msg.date().map(|d| d.to_timestamp()).unwrap_or(0),
     }
 }

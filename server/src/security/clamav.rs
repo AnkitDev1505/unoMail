@@ -94,12 +94,9 @@ const MAX_PARTS: usize = 30;
 pub fn text_parts(raw: &[u8]) -> Vec<Vec<u8>> {
     let Some(message) = mail_parser::MessageParser::default().parse(raw) else { return Vec::new() };
     message
-        .parts
-        .iter()
-        .filter_map(|part| match &part.body {
-            mail_parser::PartType::Text(text) | mail_parser::PartType::Html(text) => Some(text.trim().as_bytes().to_vec()),
-            _ => None,
-        })
+        .root()
+        .parts()
+        .filter_map(|part| part.text().map(|text| text.trim().as_bytes().to_vec()))
         .filter(|content| !content.is_empty())
         .take(MAX_PARTS)
         .collect()

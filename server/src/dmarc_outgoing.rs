@@ -1,7 +1,7 @@
 //! DMARC aggregate reports sent by this server (RFC 7489 section 7.2): how mail claiming to
 //! come from other domains fared here, once a day to the addresses their policy names.
 
-use mail_auth::report::{
+use crate::mail_report::{
     ActionDisposition, DKIMAuthResult, DkimResult, DmarcResult, PolicyOverride, PolicyOverrideReason, PolicyPublished, Record, Report, SPFAuthResult,
     SPFDomainScope, SpfResult,
 };

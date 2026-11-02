@@ -127,14 +127,14 @@ fn text_domain(text: &str) -> Option<String> {
 pub fn link_tests(raw: &[u8], sender_domain: Option<&str>, assessment: &mut Assessment) {
     let Some(message) = MessageParser::default().parse(raw) else { return };
     let mut text = String::new();
-    for index in 0..message.text_body.len().min(10) {
+    for index in 0..message.text_body().len().min(10) {
         if let Some(part) = message.body_text(index) {
             text.push_str(&part);
             text.push('\n');
         }
     }
     let mut html = String::new();
-    for index in 0..message.html_body.len().min(10) {
+    for index in 0..message.html_body().len().min(10) {
         if let Some(part) = message.body_html(index) {
             html.push_str(&part);
             html.push('\n');

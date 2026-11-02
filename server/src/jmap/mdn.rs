@@ -18,7 +18,7 @@ use crate::{
 pub fn requested_by_return_path(raw: &[u8]) -> bool {
     let Some(requested) = requested_by(raw) else { return false };
     let Some(parsed) = MessageParser::default().parse_headers(raw) else { return false };
-    let Some(return_path) = parsed.header_raw("Return-Path") else { return false };
+    let Some(return_path) = crate::mime::raw_header(parsed.headers(), "Return-Path") else { return false };
     let return_path = return_path.trim().trim_start_matches('<').trim_end_matches('>').trim();
     !return_path.is_empty() && return_path.eq_ignore_ascii_case(&requested)
 }
@@ -26,7 +26,7 @@ pub fn requested_by_return_path(raw: &[u8]) -> bool {
 /// The address a read receipt for `raw` goes to, if one was asked for.
 pub fn requested_by(raw: &[u8]) -> Option<String> {
     let parsed = MessageParser::default().parse_headers(raw)?;
-    let value = parsed.header_raw("Disposition-Notification-To")?.trim();
+    let value = crate::mime::raw_header(parsed.headers(), "Disposition-Notification-To")?.trim();
     let address = value.rsplit_once('<').map_or(value, |(_, rest)| rest.split('>').next().unwrap_or(""));
     Address::parse(address.trim()).map(|a| a.to_string())
 }

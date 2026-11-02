@@ -16,7 +16,7 @@ use std::{
     sync::{LazyLock, Mutex},
 };
 
-use mail_auth::report::{AuthFailureType, Feedback, FeedbackType, IdentityAlignment};
+use crate::mail_report::{AuthFailureType, Feedback, FeedbackType, IdentityAlignment};
 
 use crate::{app::App, util::now};
 
