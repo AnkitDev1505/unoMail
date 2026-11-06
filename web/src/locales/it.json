@@ -972,6 +972,7 @@
   "One line per conversation: sender, subject and the start of the text.": "Una riga per conversazione: mittente, oggetto e l'inizio del testo.",
   "One per line; Name <address> works too": "Uno per riga; va bene anche Nome <indirizzo>",
   "Only accept addresses the provider reports as verified": "Accetta solo gli indirizzi che il provider indica come verificati",
+  "Turn this off only for providers that never report it. A mailbox that is not linked yet then goes to whoever the provider names with its address; administrator mailboxes still need a verified address.": "Disattivalo solo per i provider che non lo segnalano mai. Una casella non ancora collegata va allora a chiunque il provider indichi con quell'indirizzo; le caselle degli amministratori richiedono comunque un indirizzo verificato.",
   "Only administrators add members": "Solo gli amministratori aggiungono membri",
   "Only needed by programs that cannot find the calendars from the server address.": "Serve solo ai programmi che non trovano i calendari a partire dall'indirizzo del server.",
   "Only open it if you expected this file from this sender.": "Aprilo solo se ti aspettavi questo file da questo mittente.",

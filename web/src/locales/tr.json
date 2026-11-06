@@ -969,6 +969,7 @@
   "One line per conversation: sender, subject and the start of the text.": "Görüşme başına bir satır: gönderen, konu ve metnin başı.",
   "One per line; Name <address> works too": "Satır başına bir tane; Ad <adres> da olur",
   "Only accept addresses the provider reports as verified": "Yalnızca sağlayıcının doğrulanmış olarak bildirdiği adresleri kabul et",
+  "Turn this off only for providers that never report it. A mailbox that is not linked yet then goes to whoever the provider names with its address; administrator mailboxes still need a verified address.": "Yalnızca bunu hiç bildirmeyen sağlayıcılar için kapatın. Henüz bağlanmamış bir posta kutusu, sağlayıcının bu adresle gösterdiği kişiye geçer; yönetici posta kutuları yine de doğrulanmış bir adres gerektirir.",
   "Only administrators add members": "Üyeleri yalnızca yöneticiler ekler",
   "Only needed by programs that cannot find the calendars from the server address.": "Yalnızca takvimleri sunucu adresinden bulamayan programlar için gereklidir.",
   "Only open it if you expected this file from this sender.": "Yalnızca bu dosyayı bu gönderenden bekliyorsanız açın.",

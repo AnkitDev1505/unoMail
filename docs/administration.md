@@ -106,7 +106,11 @@ OpenID Connect with PKCE. The provider's verified e-mail address selects an exis
 no mailboxes are created. The first sign-in links the mailbox to the provider's identity
 (its `sub`); a different identity with the same address is refused from then on. If a user's
 provider account is replaced, reset the mailbox's 2-step verification in its dialog: that also
-removes the link. IMAP and SMTP accept provider tokens (`XOAUTH2`, `OAUTHBEARER`) if
+removes the link. *Only accept addresses the provider reports as verified* stays on unless
+the provider never reports it (Microsoft Entra ID, for one): with it off, a mailbox that is not
+linked yet goes to whoever the provider names with its address. Even then administrator
+mailboxes are only linked through a verified address, and each unverified link is recorded in
+the audit log (`sso.linked_unverified`). IMAP and SMTP accept provider tokens (`XOAUTH2`, `OAUTHBEARER`) if
 they were issued to unoMail's client ID. Providers with opaque tokens and no introspection
 (e.g. Google) work for web sign-in only.
 

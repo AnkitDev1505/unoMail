@@ -42,7 +42,7 @@ async fn provider() -> (SocketAddr, Provider) {
     async fn introspect(body: String) -> Json<Value> {
         let token = body.split('&').find_map(|pair| pair.strip_prefix("token=")).unwrap_or("");
         Json(match token {
-            "token-bob" | "token-unverified" | "token-stranger" | "token-impostor" => json!({ "active": true, "client_id": "unomail", "aud": ["unomail", "account"] }),
+            "token-bob" | "token-unverified" | "token-unverified-admin" | "token-stranger" | "token-impostor" => json!({ "active": true, "client_id": "unomail", "aud": ["unomail", "account"] }),
             "token-other-app" => json!({ "active": true, "client_id": "someone-elses-app", "aud": "someone-elses-app" }),
             _ => json!({ "active": false }),
         })
@@ -60,6 +60,7 @@ async fn provider() -> (SocketAddr, Provider) {
         let profile = match token {
             "token-bob" | "token-other-app" => json!({ "sub": "u-1", "email": "Bob@Example.org", "email_verified": true }),
             "token-unverified" => json!({ "sub": "u-2", "email": "bob@example.org", "email_verified": false }),
+            "token-unverified-admin" => json!({ "sub": "u-7", "email": "admin@example.org", "email_verified": false }),
             "token-stranger" => json!({ "sub": "u-3", "email": "nobody@example.org", "email_verified": true }),
             // Someone else at the provider who came to hold Bob's address (e-mail addresses change there).
             "token-impostor" => json!({ "sub": "u-9", "email": "bob@example.org", "email_verified": true }),
@@ -215,6 +216,36 @@ async fn a_mailbox_stays_with_the_identity_that_first_signed_in() {
     assert!(browser_signs_in(&env, "code-for-impostor").await);
     assert_eq!(linked().await.as_deref(), Some("u-9"));
     assert!(!browser_signs_in(&env, "code-for-bob").await);
+}
+
+#[tokio::test]
+async fn unverified_addresses_never_claim_an_administrator_mailbox() {
+    let (env, admin, addr, _) = env_with_sso().await;
+    // Some providers never report verification; the administrator turned the check off.
+    let saved = admin.put("/api/oauth", json!({ "enabled": true, "name": "Company login", "issuer": format!("http://{addr}/"), "client_id": "unomail", "require_verified_email": false })).await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.text);
+    let ip = "127.0.0.1".parse().unwrap();
+    let db = env.app.db.clone();
+    let link = |email: &'static str| {
+        let db = db.clone();
+        async move { sqlx::query_scalar::<_, String>("SELECT l.subject FROM oauth_links l JOIN accounts a ON a.id = l.account_id WHERE a.email = ?").bind(email).fetch_optional(&db).await.unwrap() }
+    };
+
+    // Anyone able to put an administrator's address on their profile there would otherwise
+    // become that administrator here.
+    assert!(!browser_signs_in(&env, "code-for-unverified-admin").await);
+    assert!(unomail::oauth::authenticate_token(&env.app, "admin@example.org", "token-unverified-admin", ip, unomail::auth::Protocol::Imap).await.is_err());
+    assert_eq!(link("admin@example.org").await, None);
+
+    // An ordinary mailbox may be linked so, and that is recorded.
+    assert!(browser_signs_in(&env, "code-for-unverified").await);
+    assert_eq!(link("bob@example.org").await.as_deref(), Some("u-2"));
+    let audited: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'sso.linked_unverified' AND actor = 'bob@example.org'").fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(audited, 1);
+    // Later sign-ins of the linked identity are not new links.
+    assert!(browser_signs_in(&env, "code-for-unverified").await);
+    let audited: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'sso.linked_unverified'").fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(audited, 1);
 }
 
 fn xoauth2(user: &str, token: &str) -> String {

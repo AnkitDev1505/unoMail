@@ -975,6 +975,7 @@
   "One line per conversation: sender, subject and the start of the text.": "Один рядок на ланцюжок: відправник, тема й початок тексту.",
   "One per line; Name <address> works too": "По одному в рядку; можна й Ім'я <адреса>",
   "Only accept addresses the provider reports as verified": "Приймати лише адреси, які постачальник позначає як підтверджені",
+  "Turn this off only for providers that never report it. A mailbox that is not linked yet then goes to whoever the provider names with its address; administrator mailboxes still need a verified address.": "Вимикайте лише для провайдерів, які ніколи про це не повідомляють. Ще не прив’язана поштова скринька тоді дістанеться тому, кого провайдер вкаже з цією адресою; для скриньок адміністраторів і надалі потрібна підтверджена адреса.",
   "Only administrators add members": "Учасників додають лише адміністратори",
   "Only needed by programs that cannot find the calendars from the server address.": "Потрібно лише програмам, які не знаходять календарі за адресою сервера.",
   "Only open it if you expected this file from this sender.": "Відкривайте, лише якщо чекали цей файл від цього відправника.",

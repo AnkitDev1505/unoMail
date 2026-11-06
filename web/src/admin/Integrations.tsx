@@ -70,6 +70,11 @@ function SingleSignOn() {
             control={<Checkbox checked={config.require_verified_email ?? true} onChange={(e) => set({ require_verified_email: e.target.checked })} />}
             label={t('Only accept addresses the provider reports as verified')}
           />
+          {config.require_verified_email === false && (
+            <Alert severity="warning" data-testid="sso-unverified-warning">
+              {t('Turn this off only for providers that never report it. A mailbox that is not linked yet then goes to whoever the provider names with its address; administrator mailboxes still need a verified address.')}
+            </Alert>
+          )}
           <TextField label={t('Redirect URI to register with the provider')} value={config.redirect_uri} slotProps={{ htmlInput: { readOnly: true } }} />
           <Box>
             <Button variant="contained" onClick={() => void save()} disabled={!config.issuer?.trim() || !config.client_id?.trim()}>

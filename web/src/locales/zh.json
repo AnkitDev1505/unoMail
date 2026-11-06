@@ -966,6 +966,7 @@
   "One line per conversation: sender, subject and the start of the text.": "每个会话一行：发件人、主题和正文开头。",
   "One per line; Name <address> works too": "每行一个；也可以使用 姓名 <地址>",
   "Only accept addresses the provider reports as verified": "仅接受服务商报告为已验证的地址",
+  "Turn this off only for providers that never report it. A mailbox that is not linked yet then goes to whoever the provider names with its address; administrator mailboxes still need a verified address.": "仅当提供商从不报告此项时才关闭。届时尚未关联的邮箱将归属于提供商以该地址指明的任何人；管理员邮箱仍需经过验证的地址。",
   "Only administrators add members": "仅管理员可添加成员",
   "Only needed by programs that cannot find the calendars from the server address.": "仅当程序无法通过服务器地址找到日历时才需要。",
   "Only open it if you expected this file from this sender.": "只有在您预期此发件人会发送此文件时才打开它。",

@@ -975,6 +975,7 @@
   "One line per conversation: sender, subject and the start of the text.": "Jeden wiersz na wątek: nadawca, temat i początek tekstu.",
   "One per line; Name <address> works too": "Jeden na wiersz; można też podać Imię <adres>",
   "Only accept addresses the provider reports as verified": "Akceptuj tylko adresy, które dostawca oznacza jako zweryfikowane",
+  "Turn this off only for providers that never report it. A mailbox that is not linked yet then goes to whoever the provider names with its address; administrator mailboxes still need a verified address.": "Wyłącz tylko dla dostawców, którzy nigdy tego nie zgłaszają. Niepowiązana jeszcze skrzynka trafi wtedy do tego, kogo dostawca wskaże z tym adresem; skrzynki administratorów nadal wymagają zweryfikowanego adresu.",
   "Only administrators add members": "Tylko administratorzy dodają członków",
   "Only needed by programs that cannot find the calendars from the server address.": "Potrzebne tylko programom, które nie potrafią znaleźć kalendarzy na podstawie adresu serwera.",
   "Only open it if you expected this file from this sender.": "Otwieraj go tylko, jeśli spodziewasz się tego pliku od tego nadawcy.",

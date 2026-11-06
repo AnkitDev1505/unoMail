@@ -966,6 +966,7 @@
   "One line per conversation: sender, subject and the start of the text.": "1 スレッド 1 行: 送信者、件名、本文の冒頭。",
   "One per line; Name <address> works too": "1 行に 1 件。名前 <アドレス> の形式も使えます",
   "Only accept addresses the provider reports as verified": "プロバイダーが確認済みとしたアドレスのみ受け入れる",
+  "Turn this off only for providers that never report it. A mailbox that is not linked yet then goes to whoever the provider names with its address; administrator mailboxes still need a verified address.": "これを報告しないプロバイダーの場合にのみオフにしてください。まだ関連付けられていないメールボックスは、プロバイダーがそのアドレスで示す人のものになります。管理者のメールボックスには引き続き確認済みのアドレスが必要です。",
   "Only administrators add members": "メンバーの追加は管理者のみ",
   "Only needed by programs that cannot find the calendars from the server address.": "サーバーアドレスからカレンダーを見つけられないプログラムでのみ必要です。",
   "Only open it if you expected this file from this sender.": "この送信者からこのファイルが届く予定があった場合にのみ開いてください。",

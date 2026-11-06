@@ -969,6 +969,7 @@
   "One line per conversation: sender, subject and the start of the text.": "Beszélgetésenként egy sor: feladó, tárgy és a szöveg eleje.",
   "One per line; Name <address> works too": "Soronként egy; a Név <cím> forma is működik",
   "Only accept addresses the provider reports as verified": "Csak a szolgáltató által ellenőrzöttként jelölt címek elfogadása",
+  "Turn this off only for providers that never report it. A mailbox that is not linked yet then goes to whoever the provider names with its address; administrator mailboxes still need a verified address.": "Csak olyan szolgáltatóknál kapcsolja ki, amelyek ezt soha nem jelzik. Egy még nem összekapcsolt postafiók ekkor ahhoz kerül, akit a szolgáltató ezzel a címmel megnevez; a rendszergazdai postafiókokhoz továbbra is ellenőrzött cím kell.",
   "Only administrators add members": "Csak a rendszergazdák adhatnak hozzá tagokat",
   "Only needed by programs that cannot find the calendars from the server address.": "Csak azoknak a programoknak kell, amelyek a szervercím alapján nem találják meg a naptárakat.",
   "Only open it if you expected this file from this sender.": "Csak akkor nyissa meg, ha erre a fájlra számított ettől a feladótól.",

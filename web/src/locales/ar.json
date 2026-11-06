@@ -981,6 +981,7 @@
   "One line per conversation: sender, subject and the start of the text.": "سطر واحد لكل محادثة: المرسل والموضوع وبداية النص.",
   "One per line; Name <address> works too": "واحد في كل سطر؛ وتعمل صيغة الاسم <العنوان> أيضًا",
   "Only accept addresses the provider reports as verified": "قبول العناوين التي يُبلغ المزوّد بأنها موثَّقة فقط",
+  "Turn this off only for providers that never report it. A mailbox that is not linked yet then goes to whoever the provider names with its address; administrator mailboxes still need a verified address.": "لا توقف هذا الخيار إلا مع المزوّدين الذين لا يُبلغون عنه أبدًا. عندئذ يؤول صندوق البريد غير المرتبط بعد إلى من يحدده المزوّد بهذا العنوان؛ وتظل صناديق بريد المسؤولين تتطلب عنوانًا موثَّقًا.",
   "Only administrators add members": "المسؤولون فقط يضيفون الأعضاء",
   "Only needed by programs that cannot find the calendars from the server address.": "لا تحتاج إليه إلا البرامج التي لا تجد التقويمات من عنوان الخادم.",
   "Only open it if you expected this file from this sender.": "لا تفتحه إلا إذا كنت تتوقع هذا الملف من هذا المرسل.",

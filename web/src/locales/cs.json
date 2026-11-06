@@ -975,6 +975,7 @@
   "One line per conversation: sender, subject and the start of the text.": "Jeden řádek na konverzaci: odesílatel, předmět a začátek textu.",
   "One per line; Name <address> works too": "Jedna na řádek; funguje i Jméno <adresa>",
   "Only accept addresses the provider reports as verified": "Přijímat jen adresy, které poskytovatel hlásí jako ověřené",
+  "Turn this off only for providers that never report it. A mailbox that is not linked yet then goes to whoever the provider names with its address; administrator mailboxes still need a verified address.": "Vypínejte jen u poskytovatelů, kteří to nikdy nehlásí. Dosud nepropojená schránka pak připadne tomu, koho poskytovatel uvede s touto adresou; schránky správců stále vyžadují ověřenou adresu.",
   "Only administrators add members": "Členy přidávají jen správci",
   "Only needed by programs that cannot find the calendars from the server address.": "Potřebné jen pro programy, které nenajdou kalendáře z adresy serveru.",
   "Only open it if you expected this file from this sender.": "Otevřete ho jen tehdy, pokud jste tento soubor od tohoto odesílatele očekávali.",

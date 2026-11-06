@@ -972,6 +972,7 @@
   "One line per conversation: sender, subject and the start of the text.": "Un rând pe conversație: expeditor, subiect și începutul textului.",
   "One per line; Name <address> works too": "Câte unul pe rând; funcționează și Nume <adresă>",
   "Only accept addresses the provider reports as verified": "Acceptă doar adresele raportate de furnizor ca verificate",
+  "Turn this off only for providers that never report it. A mailbox that is not linked yet then goes to whoever the provider names with its address; administrator mailboxes still need a verified address.": "Dezactivați doar pentru furnizorii care nu raportează niciodată acest lucru. O căsuță poștală încă nelegată ajunge atunci la oricine indică furnizorul cu această adresă; căsuțele administratorilor necesită în continuare o adresă verificată.",
   "Only administrators add members": "Doar administratorii adaugă membri",
   "Only needed by programs that cannot find the calendars from the server address.": "Necesar doar programelor care nu găsesc calendarele pornind de la adresa serverului.",
   "Only open it if you expected this file from this sender.": "Deschideți-l doar dacă vă așteptați la acest fișier de la acest expeditor.",

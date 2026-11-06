@@ -975,6 +975,7 @@
   "One line per conversation: sender, subject and the start of the text.": "Одна строка на цепочку: отправитель, тема и начало текста.",
   "One per line; Name <address> works too": "По одному в строке; можно и Имя <адрес>",
   "Only accept addresses the provider reports as verified": "Принимать только адреса, которые поставщик отмечает как подтверждённые",
+  "Turn this off only for providers that never report it. A mailbox that is not linked yet then goes to whoever the provider names with its address; administrator mailboxes still need a verified address.": "Отключайте только для провайдеров, которые никогда об этом не сообщают. Ещё не привязанный почтовый ящик тогда достанется тому, кого провайдер укажет с этим адресом; для ящиков администраторов по-прежнему нужен подтверждённый адрес.",
   "Only administrators add members": "Участников добавляют только администраторы",
   "Only needed by programs that cannot find the calendars from the server address.": "Нужно только программам, которые не находят календари по адресу сервера.",
   "Only open it if you expected this file from this sender.": "Открывайте, только если ждали этот файл от этого отправителя.",

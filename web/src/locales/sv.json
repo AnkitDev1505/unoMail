@@ -969,6 +969,7 @@
   "One line per conversation: sender, subject and the start of the text.": "En rad per konversation: avsändare, ämne och början av texten.",
   "One per line; Name <address> works too": "En per rad; Namn <adress> fungerar också",
   "Only accept addresses the provider reports as verified": "Acceptera bara adresser som leverantören anger som verifierade",
+  "Turn this off only for providers that never report it. A mailbox that is not linked yet then goes to whoever the provider names with its address; administrator mailboxes still need a verified address.": "Stäng bara av för leverantörer som aldrig rapporterar det. En brevlåda som inte är länkad än går då till den som leverantören anger med adressen; administratörers brevlådor kräver fortfarande en verifierad adress.",
   "Only administrators add members": "Bara administratörer lägger till medlemmar",
   "Only needed by programs that cannot find the calendars from the server address.": "Behövs bara av program som inte hittar kalendrarna från serveradressen.",
   "Only open it if you expected this file from this sender.": "Öppna den bara om du väntade dig den här filen från den här avsändaren.",

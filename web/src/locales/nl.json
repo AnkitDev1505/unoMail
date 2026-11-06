@@ -969,6 +969,7 @@
   "One line per conversation: sender, subject and the start of the text.": "Eén regel per gesprek: afzender, onderwerp en het begin van de tekst.",
   "One per line; Name <address> works too": "Eén per regel; Naam <adres> werkt ook",
   "Only accept addresses the provider reports as verified": "Alleen adressen accepteren die de provider als geverifieerd meldt",
+  "Turn this off only for providers that never report it. A mailbox that is not linked yet then goes to whoever the provider names with its address; administrator mailboxes still need a verified address.": "Zet dit alleen uit voor aanbieders die het nooit melden. Een nog niet gekoppelde mailbox gaat dan naar wie de aanbieder met dat adres noemt; mailboxen van beheerders hebben nog steeds een geverifieerd adres nodig.",
   "Only administrators add members": "Alleen beheerders voegen leden toe",
   "Only needed by programs that cannot find the calendars from the server address.": "Alleen nodig voor programma's die de agenda's niet via het serveradres kunnen vinden.",
   "Only open it if you expected this file from this sender.": "Open het alleen als je dit bestand van deze afzender verwachtte.",

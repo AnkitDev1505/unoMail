@@ -115,7 +115,8 @@ struct Discovery {
 }
 
 /// Who the provider says signed in: (subject, e-mail address).
-type Identity = (String, String);
+/// Subject, e-mail address, and whether the provider verified the address.
+type Identity = (String, String, bool);
 
 /// Pending web sign-ins: state -> (PKCE verifier, network of the browser, started).
 type Pending = HashMap<String, (String, String, Instant)>;
@@ -198,8 +199,8 @@ struct UserInfo {
     email_verified: Option<serde_json::Value>,
 }
 
-/// Asks the provider who an access token belongs to. Returns (subject, e-mail).
-async fn identify(app: &App, config: &OauthConfig, access_token: &str) -> Result<(String, String), String> {
+/// Asks the provider who an access token belongs to. Returns (subject, e-mail, verified).
+async fn identify(app: &App, config: &OauthConfig, access_token: &str) -> Result<Identity, String> {
     let discovery = discover(app, config).await?;
     let response = app.http.get(&discovery.userinfo_endpoint).bearer_auth(access_token).send().await.map_err(|_| "the identity provider cannot be reached")?;
     if !response.status().is_success() {
@@ -212,7 +213,7 @@ async fn identify(app: &App, config: &OauthConfig, access_token: &str) -> Result
         return Err("the identity provider has not verified this e-mail address".into());
     }
     let email = info.email.and_then(|e| crate::util::Address::parse(&e)).ok_or("the identity provider did not return an e-mail address")?;
-    Ok((info.sub.unwrap_or_default(), email.to_string()))
+    Ok((info.sub.unwrap_or_default(), email.to_string(), verified))
 }
 
 /// Whether `value` (a string or an array of strings) names `client_id`.
@@ -288,27 +289,48 @@ async fn local_account(app: &App, email: &str) -> Result<Account, String> {
     }
 }
 
-/// Ties `account_id` to the provider's identity `subject` on its first sign-in, and from then
+/// Ties `account` to the provider's identity `subject` on its first sign-in, and from then
 /// on refuses any other identity. The e-mail address alone is not enough: providers let users
 /// change it, so a different person there could otherwise come to claim this mailbox.
 /// An administrator's sign-in reset (`DELETE /api/accounts/{id}/two-factor`) removes the tie.
-async fn bind_subject(app: &App, account_id: i64, subject: &str) -> Result<(), String> {
+///
+/// The first tie trusts the provider's word on the address. When the provider has not verified
+/// it (allowed only with `require_verified_email` off), whoever can set that address there
+/// claims the mailbox: never an administrator's, and every such tie is audited.
+async fn bind_subject(app: &App, account: &Account, subject: &str, verified: bool) -> Result<(), String> {
     let subject = sanitize_line(subject);
     if subject.is_empty() {
         return Err("the identity provider did not identify the user".into());
     }
     let refused = || "the account could not be loaded".to_owned();
-    sqlx::query("INSERT INTO oauth_links (account_id, subject, linked_at) VALUES (?, ?, ?) ON CONFLICT(account_id) DO NOTHING")
-        .bind(account_id)
-        .bind(&subject)
-        .bind(crate::util::now())
-        .execute(&app.db)
-        .await
-        .map_err(|_| refused())?;
-    let linked: String = sqlx::query_scalar("SELECT subject FROM oauth_links WHERE account_id = ?").bind(account_id).fetch_one(&app.db).await.map_err(|_| refused())?;
-    if linked != subject {
-        tracing::warn!(account_id, "single sign-on refused: the identity is not the one this mailbox is linked to");
+    let linked = |db| async move { sqlx::query_scalar::<_, String>("SELECT subject FROM oauth_links WHERE account_id = ?").bind(account.id).fetch_optional(db).await.map_err(|_| refused()) };
+    let mut first = false;
+    let current = match linked(&app.db).await? {
+        Some(subject) => subject,
+        None => {
+            if !verified && account.role != crate::auth::Role::User {
+                tracing::warn!(account_id = account.id, "single sign-on refused: an administrator mailbox needs a verified address for its first sign-in");
+                return Err("the identity provider has not verified this e-mail address".into());
+            }
+            first = sqlx::query("INSERT INTO oauth_links (account_id, subject, linked_at) VALUES (?, ?, ?) ON CONFLICT(account_id) DO NOTHING")
+                .bind(account.id)
+                .bind(&subject)
+                .bind(crate::util::now())
+                .execute(&app.db)
+                .await
+                .map_err(|_| refused())?
+                .rows_affected()
+                == 1;
+            // Another sign-in may have linked it in the meantime.
+            linked(&app.db).await?.ok_or_else(refused)?
+        }
+    };
+    if current != subject {
+        tracing::warn!(account_id = account.id, "single sign-on refused: the identity is not the one this mailbox is linked to");
         return Err("this mailbox is linked to a different identity at the identity provider".into());
+    }
+    if first && !verified {
+        crate::db::audit(&app.db, &account.email, "sso.linked_unverified", "oauth", "", "the provider did not verify the address").await;
     }
     Ok(())
 }
@@ -342,9 +364,9 @@ pub async fn finish(app: &App, state: &str, code: &str, ip: IpAddr) -> Result<Ac
         return Err("the identity provider refused the sign-in".into());
     }
     let token: TokenResponse = response.json().await.map_err(|_| "the identity provider returned an invalid token response")?;
-    let (subject, email) = identify(app, &config, &token.access_token).await?;
+    let (subject, email, verified) = identify(app, &config, &token.access_token).await?;
     let account = local_account(app, &email).await?;
-    bind_subject(app, account.id, &subject).await?;
+    bind_subject(app, &account, &subject, verified).await?;
     crate::db::audit(&app.db, &account.email, "login.success", "oauth", &ip.to_string(), "").await;
     Ok(account)
 }
@@ -372,13 +394,13 @@ pub async fn authenticate_token(app: &App, user: &str, token: &str, ip: IpAddr, 
     };
     let Some(config) = active(app).await else { return fail().await };
 
-    let Some((subject, email)) = token_identity(app, &config, token).await else { return fail().await };
+    let Some((subject, email, verified)) = token_identity(app, &config, token).await else { return fail().await };
     // A valid token for somebody else must not open this mailbox.
     if email != user {
         return fail().await;
     }
     let Ok(account) = local_account(app, &email).await else { return fail().await };
-    if bind_subject(app, account.id, &subject).await.is_err() {
+    if bind_subject(app, &account, &subject, verified).await.is_err() {
         return fail().await;
     }
     let allowed = protocol.allowed_for(&account);
@@ -420,7 +442,7 @@ async fn token_identity(app: &App, config: &OauthConfig, token: &str) -> Option<
 /// identity. Revoking it there, or turning SSO off here, ends the session within a few minutes.
 pub async fn token_still_valid(app: &App, email: &str, token: &str) -> bool {
     let Some(config) = active(app).await else { return false };
-    let Some((subject, found)) = token_identity(app, &config, token).await else { return false };
+    let Some((subject, found, _)) = token_identity(app, &config, token).await else { return false };
     let linked: Option<String> = sqlx::query_scalar("SELECT l.subject FROM oauth_links l JOIN accounts a ON a.id = l.account_id WHERE a.email = ?").bind(email).fetch_optional(&app.db).await.ok().flatten();
     found == email && linked.is_some_and(|linked| linked == sanitize_line(&subject))
 }
