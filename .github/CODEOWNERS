@@ -1,0 +1,14 @@
+# Changes to what runs in CI, what builds the releases and what pulls in dependencies need the
+# maintainer's review (enforced with "Require review from Code Owners" on main).
+/.github/                @RikoDEV
+/Dockerfile              @RikoDEV
+/docker/                 @RikoDEV
+/docker-compose.yml      @RikoDEV
+/audit.sh                @RikoDEV
+/server/Cargo.toml       @RikoDEV
+/server/Cargo.lock       @RikoDEV
+/server/.cargo/          @RikoDEV
+/web/package.json        @RikoDEV
+/web/pnpm-lock.yaml      @RikoDEV
+/e2e/package.json        @RikoDEV
+/e2e/pnpm-lock.yaml      @RikoDEV

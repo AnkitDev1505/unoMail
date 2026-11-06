@@ -28,6 +28,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
+          # Releases are meant to be signed annotated tags (docs/development.md). Not enforced
+          # yet, so that older tags can still be rebuilt; a warning shows on the run.
+          ref=$(gh api "repos/$REPO/git/ref/tags/$TAG" --jq '.object.type + " " + .object.sha')
+          verified=false
+          if [ "${ref%% *}" = tag ]; then
+            verified=$(gh api "repos/$REPO/git/tags/${ref#* }" --jq .verification.verified)
+          fi
+          [ "$verified" = true ] || echo "::warning::$TAG is not a signed annotated tag with a verified signature"
           sha=$(gh api "repos/$REPO/commits/$TAG" --jq .sha)
           # CI for the commit may still be running when the tag is pushed right after it.
           for i in $(seq 1 60); do

@@ -60,6 +60,24 @@ the jobs for the changed parts run.
 
 [`release.yml`](../.github/workflows/release.yml) builds binaries and images for `v*` tags.
 
+### Releasing
+
+Releases are signed, annotated tags of a commit whose CI run on `main` passed:
+
+```sh
+git tag -s v1.2.0 -m "unoMail 1.2.0"   # or -a with gpg.format=ssh and an SSH signing key
+git push origin v1.2.0
+```
+
+The release workflow warns when a tag is not a verified annotated tag. Repository settings
+that go with it (Settings → Rules, for `main` and `v*` tags):
+
+- `main`: no force pushes or deletion, pull requests with a review from code owners
+  ([`CODEOWNERS`](../.github/CODEOWNERS) covers CI, the Dockerfile and the dependency
+  configuration), required status checks from `ci.yml`.
+- `v*` tags: only maintainers may create, update or delete them.
+- Actions: workflow permissions read-only by default; fork pull requests need approval to run.
+
 ## Dependencies
 
 [Renovate](https://docs.renovatebot.com/) runs as a weekly workflow
