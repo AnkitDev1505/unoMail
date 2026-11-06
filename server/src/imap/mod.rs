@@ -2439,24 +2439,26 @@ fn mentions_modseq(args: &[Arg]) -> bool {
 }
 
 async fn handle(app: AppState, tcp: TcpStream, peer: SocketAddr, starttls: bool) {
-    let Some(_guard) = app.accept_connection(peer.ip()) else { return };
-    Metrics::inc(&app.metrics.imap_connections);
-    let _ = tcp.set_nodelay(true);
-    let conn = if starttls {
-        Conn::plain(tcp, LOGIN_TIMEOUT)
-    } else {
-        match Conn::accept_tls(tcp, app.tls.server_config(&[]), LOGIN_TIMEOUT).await {
-            Ok(conn) => conn,
-            Err(err) => {
-                tracing::debug!(%err, %peer, "TLS handshake failed");
-                return;
+    let Some(guard) = app.accept_connection(peer.ip()) else { return };
+    guard.run(async move {
+        Metrics::inc(&app.metrics.imap_connections);
+        let _ = tcp.set_nodelay(true);
+        let conn = if starttls {
+            Conn::plain(tcp, LOGIN_TIMEOUT)
+        } else {
+            match Conn::accept_tls(tcp, app.tls.server_config(&[]), LOGIN_TIMEOUT).await {
+                Ok(conn) => conn,
+                Err(err) => {
+                    tracing::debug!(%err, %peer, "TLS handshake failed");
+                    return;
+                }
             }
+        };
+        let session = Session { app, conn, peer, account: None, grant: None, selected: None, errors: 0, login_failures: 0, condstore: false, qresync: false, oauth: false, rev2: false, utf8: false, uid_only: false, saved: Vec::new(), notify: None };
+        if let Err(err) = session.run().await {
+            tracing::debug!(%err, %peer, "IMAP session ended with an error");
         }
-    };
-    let session = Session { app, conn, peer, account: None, grant: None, selected: None, errors: 0, login_failures: 0, condstore: false, qresync: false, oauth: false, rev2: false, utf8: false, uid_only: false, saved: Vec::new(), notify: None };
-    if let Err(err) = session.run().await {
-        tracing::debug!(%err, %peer, "IMAP session ended with an error");
-    }
+    }).await;
 }
 
 /// Serves IMAP over implicit TLS (port 993).

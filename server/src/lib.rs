@@ -49,6 +49,7 @@ pub mod security;
 pub mod settings;
 pub mod sharing;
 pub mod sieve;
+pub mod slots;
 pub mod smtp;
 pub mod smime;
 pub mod snapshot;

@@ -955,29 +955,31 @@ impl Session {
 }
 
 async fn handle(app: AppState, mode: Mode, mut tcp: TcpStream, peer: SocketAddr) {
-    let Some(_guard) = app.accept_connection(peer.ip()) else {
+    let Some(guard) = app.accept_connection(peer.ip()) else {
         use tokio::io::AsyncWriteExt;
         app.daily.add(Metric::ConnectionLimited);
         let _ = tcp.write_all(b"421 4.7.0 Too many connections from your address\r\n").await;
         return;
     };
-    Metrics::inc(&app.metrics.smtp_connections);
-    let _ = tcp.set_nodelay(true);
-    let conn = if mode == Mode::Smtps {
-        match Conn::accept_tls(tcp, app.tls.server_config(&[]), COMMAND_TIMEOUT).await {
-            Ok(conn) => conn,
-            Err(err) => {
-                tracing::debug!(%err, %peer, "TLS handshake failed");
-                return;
+    guard.run(async move {
+        Metrics::inc(&app.metrics.smtp_connections);
+        let _ = tcp.set_nodelay(true);
+        let conn = if mode == Mode::Smtps {
+            match Conn::accept_tls(tcp, app.tls.server_config(&[]), COMMAND_TIMEOUT).await {
+                Ok(conn) => conn,
+                Err(err) => {
+                    tracing::debug!(%err, %peer, "TLS handshake failed");
+                    return;
+                }
             }
+        } else {
+            Conn::plain(tcp, COMMAND_TIMEOUT)
+        };
+        let session = Session { app, mode, conn, peer, helo: None, account: None, grant: None, tx: None, errors: 0, messages: 0, whitelisted: false, spf_domain: None, unknown_recipients: 0, relay_attempts: 0 };
+        if let Err(err) = session.run().await {
+            tracing::debug!(%err, %peer, "SMTP session ended with an error");
         }
-    } else {
-        Conn::plain(tcp, COMMAND_TIMEOUT)
-    };
-    let session = Session { app, mode, conn, peer, helo: None, account: None, grant: None, tx: None, errors: 0, messages: 0, whitelisted: false, spf_domain: None, unknown_recipients: 0, relay_attempts: 0 };
-    if let Err(err) = session.run().await {
-        tracing::debug!(%err, %peer, "SMTP session ended with an error");
-    }
+    }).await;
 }
 
 /// The longest one message may take to arrive, however steadily it comes.

@@ -332,20 +332,22 @@ impl Session {
 }
 
 async fn handle(app: AppState, tcp: TcpStream, peer: SocketAddr) {
-    let Some(_guard) = app.accept_connection(peer.ip()) else { return };
-    Metrics::inc(&app.metrics.pop3_connections);
-    let _ = tcp.set_nodelay(true);
-    let conn = match Conn::accept_tls(tcp, app.tls.server_config(&[]), IDLE_TIMEOUT).await {
-        Ok(conn) => conn,
-        Err(err) => {
-            tracing::debug!(%err, %peer, "TLS handshake failed");
-            return;
+    let Some(guard) = app.accept_connection(peer.ip()) else { return };
+    guard.run(async move {
+        Metrics::inc(&app.metrics.pop3_connections);
+        let _ = tcp.set_nodelay(true);
+        let conn = match Conn::accept_tls(tcp, app.tls.server_config(&[]), IDLE_TIMEOUT).await {
+            Ok(conn) => conn,
+            Err(err) => {
+                tracing::debug!(%err, %peer, "TLS handshake failed");
+                return;
+            }
+        };
+        let session = Session { app, conn, peer, user: None, account: None, grant: None, messages: Vec::new(), deleted: HashSet::new(), errors: 0 };
+        if let Err(err) = session.run().await {
+            tracing::debug!(%err, %peer, "POP3 session ended with an error");
         }
-    };
-    let session = Session { app, conn, peer, user: None, account: None, grant: None, messages: Vec::new(), deleted: HashSet::new(), errors: 0 };
-    if let Err(err) = session.run().await {
-        tracing::debug!(%err, %peer, "POP3 session ended with an error");
-    }
+    }).await;
 }
 
 pub async fn serve(app: AppState, listener: TcpListener) {

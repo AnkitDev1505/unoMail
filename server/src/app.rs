@@ -141,28 +141,41 @@ impl Metrics {
     }
 }
 
-/// Decrements the active connection gauge when a protocol session ends.
-pub struct ConnectionGuard(Arc<App>, String);
+/// A mail protocol connection's slot; decrements the active connection gauge when the
+/// session ends.
+pub struct ConnectionGuard(Arc<App>, crate::slots::Slot);
+
+impl ConnectionGuard {
+    /// Whether the slot went to a newcomer (the session is being ended).
+    pub fn is_evicted(&self) -> bool {
+        self.1.is_evicted()
+    }
+
+    /// Runs the session until it ends, or until its slot goes to a newcomer because the
+    /// server is full and this connection's network holds more than its share.
+    pub async fn run<F: std::future::Future<Output = ()>>(&self, session: F) {
+        if self.1.guard(session).await.is_none() {
+            tracing::debug!("connection ended to make room for another network");
+        }
+    }
+}
 
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         self.0.metrics.active_connections.fetch_sub(1, Ordering::Relaxed);
-        let mut conns = self.0.connections.lock();
-        if let Some(entry) = conns.get_mut(&self.1) {
-            entry.active = entry.active.saturating_sub(1);
-        }
     }
 }
 
 #[derive(Default)]
 struct IpConnections {
-    active: u32,
     window_start: i64,
     recent: u32,
 }
 
 pub const MAX_CONNECTIONS_PER_IP: u32 = 20;
 pub const MAX_CONNECTIONS_PER_IP_PER_MINUTE: u32 = 60;
+/// Mail protocol connections open at once, over all mail ports.
+pub const MAX_MAIL_CONNECTIONS: usize = 1024;
 
 pub struct App {
     pub cfg: Config,
@@ -198,7 +211,10 @@ pub struct App {
     /// Connection counts for the dashboard's daily statistics, not yet written.
     pub daily: crate::dailystats::Pending,
     pub started_at: i64,
+    /// Connection rates per network (connections per minute).
     connections: Mutex<HashMap<String, IpConnections>>,
+    /// Open mail protocol connections, shared fairly between networks.
+    mail_slots: Arc<crate::slots::Slots>,
     /// Events waiting for the webhook worker, which starts with the first one.
     pub webhooks: std::sync::OnceLock<tokio::sync::mpsc::Sender<(&'static str, serde_json::Value)>>,
 }
@@ -292,6 +308,7 @@ impl App {
             access: Default::default(),
             started_at: now(),
             connections: Mutex::new(HashMap::new()),
+            mail_slots: crate::slots::Slots::new(MAX_MAIL_CONNECTIONS, MAX_CONNECTIONS_PER_IP as usize),
             webhooks: std::sync::OnceLock::new(),
         }))
     }
@@ -333,25 +350,24 @@ impl App {
         self.activity.connection(ip);
         let now = now();
         let mut conns = self.connections.lock();
-        if self.metrics.active_connections.load(Ordering::Relaxed) >= 1024 { return None; }
         let network = crate::auth::network(ip);
         if conns.len() >= 50_000 {
-            conns.retain(|_, c| c.active > 0 || now - c.window_start < 60);
+            conns.retain(|_, c| now - c.window_start < 60);
             if conns.len() >= 50_000 && !conns.contains_key(&network) { return None; }
         }
-        let entry = conns.entry(network.clone()).or_default();
+        let entry = conns.entry(network).or_default();
         if now - entry.window_start >= 60 {
             entry.window_start = now;
             entry.recent = 0;
         }
         // Loopback is exempt: health checks, the bundled filter and tests all originate there.
-        if !ip.is_loopback() && (entry.active >= MAX_CONNECTIONS_PER_IP || entry.recent >= MAX_CONNECTIONS_PER_IP_PER_MINUTE) {
+        if !ip.is_loopback() && entry.recent >= MAX_CONNECTIONS_PER_IP_PER_MINUTE {
             return None;
         }
-        entry.active += 1;
+        let slot = self.mail_slots.take(ip, ip.is_loopback())?;
         entry.recent += 1;
         self.metrics.active_connections.fetch_add(1, Ordering::Relaxed);
-        Some(ConnectionGuard(self.clone(), network))
+        Some(ConnectionGuard(self.clone(), slot))
     }
 }
 

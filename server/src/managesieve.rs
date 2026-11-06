@@ -425,12 +425,14 @@ impl Session {
 }
 
 async fn handle(app: AppState, tcp: TcpStream, peer: SocketAddr) {
-    let Some(_guard) = app.accept_connection(peer.ip()) else { return };
-    let _ = tcp.set_nodelay(true);
-    let session = Session { app, conn: Conn::plain(tcp, LOGIN_TIMEOUT), peer, account: None, grant: None, errors: 0, failures: 0 };
-    if let Err(err) = session.run().await {
-        tracing::debug!(%err, %peer, "ManageSieve session ended with an error");
-    }
+    let Some(guard) = app.accept_connection(peer.ip()) else { return };
+    guard.run(async move {
+        let _ = tcp.set_nodelay(true);
+        let session = Session { app, conn: Conn::plain(tcp, LOGIN_TIMEOUT), peer, account: None, grant: None, errors: 0, failures: 0 };
+        if let Err(err) = session.run().await {
+            tracing::debug!(%err, %peer, "ManageSieve session ended with an error");
+        }
+    }).await;
 }
 
 /// Serves ManageSieve with STARTTLS (port 4190).

@@ -57,3 +57,24 @@ async fn ipv6_addresses_share_connection_allowance() {
     assert!(env.app.accept_connection("2001:db8:1:3::1".parse().unwrap()).is_some());
     drop(guards);
 }
+
+#[tokio::test]
+async fn idle_connections_from_a_few_networks_cannot_lock_out_mail_clients() {
+    use unomail::app::{MAX_CONNECTIONS_PER_IP, MAX_MAIL_CONNECTIONS};
+    let env = TestEnv::start().await;
+    // Enough addresses, each at its own limit, to fill every mail connection slot.
+    let addresses = MAX_MAIL_CONNECTIONS.div_ceil(MAX_CONNECTIONS_PER_IP as usize);
+    let mut held = Vec::new();
+    for a in 0..addresses {
+        for _ in 0..MAX_CONNECTIONS_PER_IP {
+            if let Some(guard) = env.app.accept_connection(format!("198.18.{}.{}", a / 200, a % 200 + 1).parse().unwrap()) {
+                held.push(guard);
+            }
+        }
+    }
+    let live = |held: &[unomail::app::ConnectionGuard]| held.iter().filter(|g| !g.is_evicted()).count();
+    assert_eq!(live(&held), MAX_MAIL_CONNECTIONS);
+    let client = env.app.accept_connection("203.0.113.50".parse().unwrap());
+    assert!(client.is_some(), "a new network must still get a connection");
+    assert_eq!(live(&held), MAX_MAIL_CONNECTIONS - 1, "one connection of a full network made room");
+}
