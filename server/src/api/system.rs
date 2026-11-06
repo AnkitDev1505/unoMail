@@ -252,12 +252,15 @@ pub async fn health(State(state): State<AppState>) -> Response {
 
 /// Prometheus metrics. Available to private/loopback scrapers, or with the bearer token from
 /// `UNOMAIL_METRICS_TOKEN`; never to anonymous clients on the public internet.
-pub async fn metrics(State(state): State<AppState>, ClientIp(ip): ClientIp, headers: HeaderMap) -> Response {
+pub async fn metrics(State(state): State<AppState>, ClientIp(ip): ClientIp, axum::Extension(super::PeerAddr(peer)): axum::Extension<super::PeerAddr>, headers: HeaderMap) -> Response {
+    let proxied_by_trusted = |state: &AppState, peer: std::net::SocketAddr| state.cfg.trusted_proxies.iter().any(|net| net.contains(&peer.ip()));
     let bearer = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "));
     let authorized = match (&state.cfg.metrics_token, bearer) {
         (Some(expected), Some(given)) => ct_eq(expected.as_bytes(), given.as_bytes()),
         (Some(_), None) => false,
-        (None, _) => is_trusted_source(&state.cfg, ip),
+        // Without a token only local scrapers get in. A request relayed by a proxy the operator
+        // did not list carries the proxy's address, not its client's: it may come from anywhere.
+        (None, _) => is_trusted_source(&state.cfg, ip) && !(super::relayed(&headers) && !proxied_by_trusted(&state, peer)),
     };
     if !authorized {
         return StatusCode::NOT_FOUND.into_response();

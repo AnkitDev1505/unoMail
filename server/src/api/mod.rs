@@ -68,10 +68,28 @@ fn client_ip(parts: &Parts, state: &AppState) -> IpAddr {
     let peer = parts.extensions.get::<PeerAddr>().map_or(IpAddr::from([0, 0, 0, 0]), |p| p.0.ip());
     let trusted = |ip: &IpAddr| state.cfg.trusted_proxies.iter().any(|net| net.contains(ip));
     if !trusted(&peer) {
+        if relayed(&parts.headers) && (peer.is_loopback() || crate::security::reputation::is_private(peer)) {
+            warn_untrusted_proxy(peer);
+        }
         return peer;
     }
     let values: Vec<&str> = parts.headers.get_all("x-forwarded-for").iter().map(|v| v.to_str().unwrap_or("?")).collect();
     forwarded_client(peer, &values, trusted)
+}
+
+/// Whether a request names a client of its own: it came through a proxy (or claims to).
+pub fn relayed(headers: &axum::http::HeaderMap) -> bool {
+    ["x-forwarded-for", "forwarded", "x-real-ip"].iter().any(|name| headers.contains_key(*name))
+}
+
+/// A local proxy that is not in `UNOMAIL_TRUSTED_PROXIES` makes every client look like the
+/// proxy: one login limit for all of them, and loopback-only pages open to the internet. Said
+/// once per run, since it is a configuration mistake rather than an event.
+fn warn_untrusted_proxy(peer: IpAddr) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(%peer, "requests arrive through a proxy that UNOMAIL_TRUSTED_PROXIES does not list: every client counts as that proxy; add its address there");
+    });
 }
 
 /// The client named by `X-Forwarded-For` values that a trusted proxy (`peer`) passed on.

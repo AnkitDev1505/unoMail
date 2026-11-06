@@ -35,7 +35,7 @@ be changed at runtime, see [Runtime settings](#runtime-settings).
 | `UNOMAIL_PUBLIC_HTTPS_PORT` | HTTPS port | External HTTPS port, if remapped |
 | `UNOMAIL_HTTP_REDIRECT` | `true` | Redirect HTTP to HTTPS |
 | `UNOMAIL_COOKIE_SECURE` | `true` | `false` only for local development |
-| `UNOMAIL_TRUSTED_PROXIES` | – | CIDRs whose `X-Forwarded-For` is trusted |
+| `UNOMAIL_TRUSTED_PROXIES` | – | CIDRs whose `X-Forwarded-For` is trusted. Behind a reverse proxy, list it here (also when it runs on the same host): otherwise every client counts as the proxy |
 | `UNOMAIL_TRUSTED_NETWORKS` | – | CIDRs of relays that skip sender checks and may read `/metrics` |
 | `UNOMAIL_ALLOW_PRIVATE_DESTINATIONS` | `false` | Allow private addresses for outbound HTTP and SMTP (testing only) |
 | `UNOMAIL_PACKAGES_ALLOW_LOCAL` | `false` | Allow installing packages from local `file://` repositories (testing only) |
@@ -114,7 +114,7 @@ variable afterwards.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `UNOMAIL_METRICS_TOKEN` | – | Bearer token for `/metrics` |
+| `UNOMAIL_METRICS_TOKEN` | – | Bearer token for `/metrics`. Without one, only loopback and `UNOMAIL_TRUSTED_NETWORKS` may scrape, and not through a proxy that `UNOMAIL_TRUSTED_PROXIES` does not list |
 | `UNOMAIL_OTLP_ENDPOINT` | – | OTLP/HTTP collector, e.g. `http://otel-collector:4318` |
 | `UNOMAIL_OTLP_HEADERS` | – | `key=value,...` |
 | `UNOMAIL_OTLP_SERVICE_NAME` | `unomail` | Span `service.name` |

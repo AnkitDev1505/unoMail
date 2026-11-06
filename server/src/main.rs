@@ -205,6 +205,9 @@ async fn main() -> anyhow::Result<()> {
     let pop3s = bind(cfg, cfg.pop3s_port, "POP3S").await?;
     let sieve = if cfg.sieve_port == 0 { None } else { Some(bind(cfg, cfg.sieve_port, "ManageSieve").await?) };
     let lmtp = if cfg.lmtp_port == 0 { None } else { Some(bind(cfg, cfg.lmtp_port, "LMTP").await?) };
+    if !cfg.http_redirect && cfg.trusted_proxies.is_empty() {
+        tracing::warn!("UNOMAIL_HTTP_REDIRECT is off, as behind a TLS-terminating proxy, but UNOMAIL_TRUSTED_PROXIES is empty: list the proxy's address there, otherwise every client counts as the proxy (one login limit for all)");
+    }
     let http_listener = bind(cfg, cfg.http_port, "HTTP").await?;
     let https_listener = bind(cfg, cfg.https_port, "HTTPS").await?;
 

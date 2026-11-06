@@ -450,6 +450,15 @@ async fn health_is_public_and_metrics_are_protected() {
     let mut local = Api::new(&env);
     local.peer = "127.0.0.1:5000".parse().unwrap();
     assert_eq!(local.get("/metrics").await.status, StatusCode::OK);
+    // A local proxy the operator did not list relays requests from anywhere.
+    assert_eq!(local.send(Method::GET, "/metrics", None, &[("x-forwarded-for", "203.0.113.5")]).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(local.send(Method::GET, "/metrics", None, &[("forwarded", "for=203.0.113.5")]).await.status, StatusCode::NOT_FOUND);
+    // A listed one names its client, and that client decides.
+    let proxied = TestEnv::start_with(|cfg| cfg.trusted_proxies = vec!["127.0.0.1/32".parse().unwrap()]).await;
+    let mut through = Api::new(&proxied);
+    through.peer = "127.0.0.1:5000".parse().unwrap();
+    assert_eq!(through.send(Method::GET, "/metrics", None, &[("x-forwarded-for", "203.0.113.5")]).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(through.send(Method::GET, "/metrics", None, &[("x-forwarded-for", "127.0.0.1")]).await.status, StatusCode::OK);
     let env = TestEnv::start_with(|cfg| cfg.trusted_networks = vec!["10.0.0.0/24".parse().unwrap()]).await;
     let mut internal = Api::new(&env);
     internal.peer = "10.0.0.5:5000".parse().unwrap();
