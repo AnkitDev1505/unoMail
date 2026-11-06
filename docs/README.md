@@ -8,6 +8,7 @@
 | [Configuration](configuration.md) | Environment variables and runtime settings |
 | [Administration](administration.md) | Dashboard, spam, backups, integrations, lists, AI models |
 | [Security model](security-model.md) | Authentication, sessions, encryption, transport |
+| [Threat model](threat-model.md) | Assets, trust boundaries, residual risks, production checklist, incident response |
 | [Known limitations](limitations.md) | What isn't supported |
 
 ## Use it

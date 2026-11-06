@@ -1,6 +1,6 @@
 # Security model
 
-Threat model and review record: [SECURITY.md](../SECURITY.md).
+Threat model: [Threat model](threat-model.md). Reporting vulnerabilities: [SECURITY.md](../SECURITY.md).
 
 ## Authentication
 
