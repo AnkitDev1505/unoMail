@@ -254,6 +254,8 @@ fn claims_our_verdict(field: &[u8], hostname: &str) -> bool {
     let Some((name, value)) = text.split_once(':') else { return false };
     match name.trim().to_ascii_lowercase().as_str() {
         "x-virus-status" => true,
+        // Only this server says that a message came from a source it trusts.
+        "x-unomail-trusted-source" => true,
         "authentication-results" => {
             let value = super::summary::without_comments(value);
             let authserv = value.split(';').next().unwrap_or("").split_whitespace().next().unwrap_or("");
@@ -319,6 +321,9 @@ Authentication-Results: other.example.net; spf=pass\r\nSubject: hi\r\n\r\nAuthen
         assert!(out.starts_with("Received: from x\r\n"));
         let claimed = String::from_utf8(strip_forged_results(b"X-Virus-Status: Clean\r\n\t(trust me)\r\nSubject: hi\r\n\r\nX-Virus-Status: body\r\n", "mail.example.com")).unwrap();
         assert_eq!(claimed, "Subject: hi\r\n\r\nX-Virus-Status: body\r\n");
+        // Nor may a sender claim to have come from a source the server trusts.
+        let trusted = String::from_utf8(strip_forged_results(b"x-unomail-trusted-source: yes\r\nSubject: hi\r\n\r\nbody", "mail.example.com")).unwrap();
+        assert_eq!(trusted, "Subject: hi\r\n\r\nbody");
     }
 
     #[test]

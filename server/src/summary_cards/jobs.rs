@@ -28,6 +28,8 @@ async fn process(state: &AppState, account: i64, id: i64, explicit_ai: bool) -> 
     if message.deleted || message.draft || matches!(mailbox.role.as_deref(), Some("junk" | "trash" | "drafts" | "sent")) { return Ok(()); }
     let raw = state.store.read_blob(&message.blob_hash).await?;
     if crate::openpgp::is_encrypted(&raw) { return Ok(()); }
+    // Forged senders get no card (see `sender_authenticated`).
+    if !super::sender_authenticated(&raw, &state.cfg.hostname, &message.from_addr) { return Ok(()); }
     let structured = extract::structured(&raw);
     if !structured.is_empty() { return persist(state, account, id, &message.from_addr, structured, "structured").await; }
     let config = config(state).await?;

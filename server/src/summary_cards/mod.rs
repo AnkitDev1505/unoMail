@@ -201,6 +201,25 @@ impl Card {
     }
 }
 
+/// Whether the visible sender of `raw` was authenticated when the message arrived: DMARC
+/// passed for it, a DKIM signature of its domain (or a parent or child of it) verified, a
+/// signed-in user of this server sent it, or a source the operator trusts handed it over. Cards look like the sender's own word and are keyed
+/// by the sender's domain, so a forged `From:` must neither create one nor join a real one.
+pub fn sender_authenticated(raw: &[u8], hostname: &str, from_addr: &str) -> bool {
+    let Some(domain) = from_addr.rsplit_once('@').map(|(_, d)| d.trim_end_matches('.').to_ascii_lowercase()).filter(|d| !d.is_empty()) else { return false };
+    let found = crate::security::summary::summarize(raw, hostname);
+    if found.trusted_source {
+        return true;
+    }
+    let aligned = |signer: &str| signer == domain || domain.ends_with(&format!(".{signer}")) || signer.ends_with(&format!(".{domain}"));
+    match found.verdict {
+        "internal" => true,
+        "verified" => found.from_domain.as_deref().is_none_or(|d| d == domain),
+        "failed" => false,
+        _ => found.dkim.as_deref() == Some("pass") && found.signed_by.iter().any(|signer| aligned(signer)),
+    }
+}
+
 /// Store source facts atomically, idempotent across retries and process restarts.
 pub async fn persist(state: &AppState, account: i64, message: i64, sender: &str, cards: Vec<extract::Extracted>, method: &str) -> Result<(), ApiError> {
     let domain = sender.rsplit_once('@').map(|(_, d)| d.to_ascii_lowercase()).ok_or_else(|| ApiError::bad("message has no sender domain"))?;
@@ -255,6 +274,29 @@ pub async fn cards_for(state: &AppState, account: i64, message: i64) -> Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_authenticated_senders_make_cards() {
+        const HOST: &str = "mail.example.com";
+        let stored = |results: &str| format!("Received: from out.shop.test ([203.0.113.9])\r\n\tby {HOST} with ESMTPS id x; Tue, 13 Oct 2026 10:00:00 +0000\r\nAuthentication-Results: {HOST}; {results}\r\nFrom: orders@shop.test\r\n\r\nbody");
+        let ok = |raw: &str| sender_authenticated(raw.as_bytes(), HOST, "orders@shop.test");
+        assert!(ok(&stored("spf=pass smtp.mailfrom=shop.test; dkim=pass header.d=shop.test; dmarc=pass header.from=shop.test")));
+        assert!(ok(&stored("spf=none; dkim=pass header.d=shop.test; dmarc=none")), "an aligned signature without a DMARC record");
+        assert!(ok(&stored("dkim=pass header.d=mail.shop.test; dmarc=none")), "relaxed alignment");
+        assert!(!ok(&stored("spf=pass smtp.mailfrom=bulk.test; dkim=pass header.d=bulk.test; dmarc=none")), "signed by somebody else");
+        assert!(!ok(&stored("spf=none; dkim=none; dmarc=none")), "nothing checked: a forged From looks like this");
+        assert!(!ok(&stored("spf=fail smtp.mailfrom=shop.test; dkim=none; dmarc=fail header.from=shop.test")));
+        assert!(!ok(&stored("dmarc=pass header.from=other.test")), "DMARC passed for another domain");
+        // Results written by anybody but this server do not count.
+        assert!(!ok("Authentication-Results: elsewhere.test; dmarc=pass header.from=shop.test\r\nFrom: orders@shop.test\r\n\r\nbody"));
+        // A colleague's mail sent through this server.
+        let local = format!("Received: from client ([192.0.2.4])\r\n\tby {HOST} with ESMTPSA id y; Tue, 13 Oct 2026 10:00:00 +0000\r\nFrom: orders@shop.test\r\n\r\nbody");
+        assert!(ok(&local));
+        assert!(!sender_authenticated(b"From: nobody\r\n\r\n", HOST, "nobody"));
+        // Mail a trusted relay handed over was not checked here, but is vouched for.
+        assert!(ok(&format!("{}From: orders@shop.test\r\n\r\nbody", crate::security::summary::trusted_source_header())));
+    }
+
     #[test]
     fn updates_keep_order_facts_and_separate_shipments() {
         let mut order = Purchase { merchant: "Shop".into(), order_number: "42".into(), items: vec!["Book".into()], total: Some(Money { amount: "12.50".into(), currency: "EUR".into() }), ..Default::default() };

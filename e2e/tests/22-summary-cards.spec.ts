@@ -1,25 +1,41 @@
 import { expect, test, type Page } from '@playwright/test';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { ADMIN, login, openAdmin, USER_PASSWORD } from './helpers';
+import { ADMIN, login, openAdmin, smtpDeliver, USER_PASSWORD } from './helpers';
 
 async function auth(page: Page) {
   const session = await (await page.request.get('/api/auth/me')).json();
   return { 'x-csrf-token': session.csrf_token as string };
 }
-async function importMail(page: Page, subject: string, body: string, html = false, day = 1) {
+/**
+ * Delivers a shop's message over SMTP and returns its JMAP id. Cards only come from senders
+ * the server could vouch for; mail stored by the user (JMAP import, IMAP APPEND) never counts,
+ * while this local delivery comes from a source the server trusts.
+ */
+async function deliverMail(page: Page, subject: string, body: string, html = false, day = 1) {
+  const headers = await auth(page);
+  const me = (await (await page.request.get('/api/auth/me')).json()).account.email as string;
+  const raw = `From: Shop <orders@shop.test>\r\nTo: ${me}\r\nSubject: ${subject}\r\nDate: ${day} Nov 2026 12:00:00 +0000\r\nContent-Type: text/${html ? 'html' : 'plain'}; charset=utf-8\r\n\r\n${body}`;
+  await smtpDeliver('orders@shop.test', me, raw);
+  const session = await (await page.request.get('/jmap/session')).json();
+  const accountId = session.primaryAccounts['urn:ietf:params:jmap:mail'];
+  const call = async (methodCalls: unknown[]) => (await (await page.request.post('/jmap/api', { headers, data: { using: [], methodCalls } })).json()).methodResponses;
+  let id = '';
+  await expect.poll(async () => {
+    const found = await call([['Email/query', { accountId, filter: { subject }, sort: [{ property: 'receivedAt', isAscending: false }] }, 'q']]);
+    id = found[0][1].ids?.[0] ?? '';
+    return id;
+  }).not.toBe('');
+  return id;
+}
+/** Opens a message's conversation in the reader. Delivered order mail is sorted into an
+ * inbox category, so it is opened by address rather than looked for in a list. */
+async function openMessage(page: Page, id: string) {
   const headers = await auth(page);
   const session = await (await page.request.get('/jmap/session')).json();
   const accountId = session.primaryAccounts['urn:ietf:params:jmap:mail'];
-  const raw = `From: Shop <orders@shop.test>\r\nSubject: ${subject}\r\nDate: ${day} Nov 2026 12:00:00 +0000\r\nContent-Type: text/${html ? 'html' : 'plain'}; charset=utf-8\r\n\r\n${body}`;
-  const upload = await page.request.post(`/jmap/upload/${accountId}`, { headers: { ...headers, 'content-type': 'message/rfc822' }, data: Buffer.from(raw) });
-  expect(upload.status()).toBe(201);
-  const call = async (methodCalls: unknown[]) => (await (await page.request.post('/jmap/api', { headers, data: { using: [], methodCalls } })).json()).methodResponses;
-  const boxes = await call([['Mailbox/get', { accountId }, 'boxes']]);
-  const inbox = boxes[0][1].list.find((b: { role: string }) => b.role === 'inbox').id;
-  const result = await call([['Email/import', { accountId, emails: { mail: { blobId: (await upload.json()).blobId, mailboxIds: { [inbox]: true } } } }, 'import']]);
-  expect(result[0][1].created?.mail?.id, JSON.stringify(result)).toBeTruthy();
-  return result[0][1].created.mail.id as string;
+  const reply = await (await page.request.post('/jmap/api', { headers, data: { using: [], methodCalls: [['Email/get', { accountId, ids: [id], properties: ['threadId'] }, 'e']] } })).json();
+  await page.goto(`/mail/inbox/${reply.methodResponses[0][1].list[0].threadId}`);
 }
 const markup = (data: unknown) => `<script type="application/ld+json">${JSON.stringify(data)}</script><p>Your purchase details are attached to this email.</p>`;
 const cards = async (page: Page, id: string) => (await (await page.request.get(`/api/me/summary-cards?email_id=${id}`)).json());
@@ -33,12 +49,11 @@ test('structured purchase cards consolidate messages, retain dismissal and follo
   try {
     const user = await context.newPage();
     await login(user, 'purchase-reader@e2e.test', USER_PASSWORD);
-    const order = await importMail(user, 'Purchase confirmation P42', markup({ '@type': 'Order', seller: { name: 'Book Shop' }, orderNumber: 'P42', orderedItem: { name: 'A very good book' }, totalPrice: '12.50', priceCurrency: 'EUR', url: 'https://shop.test/orders/P42' }), true);
+    const order = await deliverMail(user, 'Purchase confirmation P42', markup({ '@type': 'Order', seller: { name: 'Book Shop' }, orderNumber: 'P42', orderedItem: { name: 'A very good book' }, totalPrice: '12.50', priceCurrency: 'EUR', url: 'https://shop.test/orders/P42' }), true);
     const shippingData = { '@type': 'ParcelDelivery', partOfOrder: { seller: { name: 'Book Shop' }, orderNumber: 'P42' }, carrier: { name: 'Parcel Service' }, trackingNumber: 'TRACK42', trackingUrl: 'https://carrier.test/track/42', expectedArrivalFrom: '2026-11-04', expectedArrivalUntil: '2026-11-05', deliveryStatus: { eventType: 'Shipped' } };
-    await importMail(user, 'Purchase shipped P42', markup(shippingData), true, 2);
+    await deliverMail(user, 'Purchase shipped P42', markup(shippingData), true, 2);
     await expect.poll(async () => (await cards(user, order)).cards[0]?.purchase.status).toBe('shipped');
-    await user.reload();
-    await user.getByTestId('email-row').filter({ hasText: 'Purchase confirmation P42' }).click();
+    await openMessage(user, order);
     const card = user.getByRole('article', { name: 'Purchase from Book Shop', exact: true });
     await expect(card).toBeVisible();
     await expect(card).toContainText('A very good book');
@@ -54,7 +69,7 @@ test('structured purchase cards consolidate messages, retain dismissal and follo
     await expect(user.getByRole('button', { name: 'Show summary card', exact: true })).toBeVisible();
     await user.getByRole('button', { name: 'Show summary card', exact: true }).click();
     await expect(card).toBeVisible();
-    await importMail(user, 'Purchase delivered P42', markup({ ...shippingData, deliveryStatus: { eventType: 'Delivered' } }), true, 3);
+    await deliverMail(user, 'Purchase delivered P42', markup({ ...shippingData, deliveryStatus: { eventType: 'Delivered' } }), true, 3);
     await expect.poll(async () => (await cards(user, order)).cards[0]?.purchase.status).toBe('delivered');
     await user.reload();
     await expect(card.getByText('Delivered', { exact: true }).first()).toBeVisible();
@@ -107,11 +122,10 @@ test('AI extraction is explicit or requires both automatic-processing switches',
     await login(user, 'purchase-ai@e2e.test', USER_PASSWORD);
     const userHeaders = await auth(user);
     const message = (number: string) => `Shop order ${number} ships on 2026-11-10.\nTracking number TRACK-AI\nhttps://carrier.test/ai`;
-    const first = await importMail(user, 'Order AI42', message('AI42'));
+    const first = await deliverMail(user, 'Order AI42', message('AI42'));
     await expect.poll(async () => (await cards(user, first)).state).toBe('done');
     expect(requests).toHaveLength(0); // User has not opted in.
-    await user.reload();
-    await user.getByTestId('email-row').filter({ hasText: 'Order AI42' }).click();
+    await openMessage(user, first);
     await user.getByRole('button', { name: 'Extract summary card with AI', exact: true }).click();
     const card = user.getByRole('article', { name: 'Purchase from Shop', exact: true });
     await expect(card).toBeVisible();
@@ -121,18 +135,18 @@ test('AI extraction is explicit or requires both automatic-processing switches',
     await user.goto('/settings?tab=inbox');
     await user.getByLabel('Automatically extract summary cards with AI', { exact: true }).check();
     await expect.poll(async () => (await (await user.request.get('/api/me/preferences')).json()).summary_cards_ai).toBe(true);
-    const second = await importMail(user, 'Order AI43', message('AI43'));
+    const second = await deliverMail(user, 'Order AI43', message('AI43'));
     await expect.poll(async () => (await cards(user, second)).cards.length).toBe(1);
     expect(requests).toHaveLength(2);
     const config = { model_id: modelId, automatic_ai: false };
     expect((await page.request.put('/api/models/summary-cards', { headers, data: config })).ok()).toBe(true);
-    const third = await importMail(user, 'Order AI44', message('AI44'));
+    const third = await deliverMail(user, 'Order AI44', message('AI44'));
     await expect.poll(async () => (await cards(user, third)).state).toBe('done');
     expect(requests).toHaveLength(2); // Admin switch is off.
     const prefs = await (await user.request.get('/api/me/preferences')).json();
     expect((await user.request.put('/api/me/preferences', { headers: userHeaders, data: { ...prefs, summary_cards_ai: false } })).ok()).toBe(true);
     expect((await page.request.put('/api/models/summary-cards', { headers, data: { ...config, automatic_ai: true } })).ok()).toBe(true);
-    const fourth = await importMail(user, 'Order AI45', message('AI45'));
+    const fourth = await deliverMail(user, 'Order AI45', message('AI45'));
     await expect.poll(async () => (await cards(user, fourth)).state).toBe('done');
     expect(requests).toHaveLength(2); // User switch is off again.
     const before = await user.request.get('/api/models/summary-cards');

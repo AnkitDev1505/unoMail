@@ -180,6 +180,10 @@ pub async fn accept_inbound(app: &App, msg: Inbound<'_>) -> Outcome {
     // Whether the visible author is (DMARC passed). Mail from the server itself, a trusted
     // network or a trusted relay skips the checks: those sources are vouched for.
     let mut author_verified = is_trusted_source(&app.cfg, msg.ip) || msg.trusted_relay;
+    if author_verified {
+        // Recorded for what reads the stored message later (summary cards).
+        extra_headers.push_str(&crate::security::summary::trusted_source_header());
+    }
 
     if let Some(authenticator) = &app.authenticator
         // Only the server itself and networks the operator vouches for skip the checks: a

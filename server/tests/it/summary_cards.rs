@@ -4,9 +4,16 @@ use common::{Api, TestEnv};
 use serde_json::{Value, json};
 use unomail::{auth::Account, store::Flags, summary_cards::{self, jobs}};
 
+/// A message from `sender` as this server stores it after DMARC passed for its domain.
 async fn append(env: &TestEnv, account: &Account, sender: &str, value: Value, day: i32) -> i64 {
+    let domain = sender.rsplit_once('@').unwrap().1;
+    append_with(env, account, sender, value, day, &format!("spf=pass smtp.mailfrom={domain}; dkim=pass header.d={domain}; dmarc=pass header.from={domain}")).await
+}
+
+async fn append_with(env: &TestEnv, account: &Account, sender: &str, value: Value, day: i32, results: &str) -> i64 {
     let inbox = env.app.store.mailbox_by_role(account.id, "inbox").await.unwrap().unwrap();
-    let raw = format!("From: Shop <{sender}>\r\nTo: {}\r\nSubject: Order update\r\nDate: {day:02} Nov 2026 12:00:00 +0000\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<script type=\"application/ld+json\">{value}</script><p>Purchase update.</p>", account.email);
+    let host = &env.app.cfg.hostname;
+    let raw = format!("Received: from out.sender.test ([203.0.113.9])\r\n\tby {host} with ESMTPS id t; {day:02} Nov 2026 12:00:00 +0000\r\nAuthentication-Results: {host}; {results}\r\nFrom: Shop <{sender}>\r\nTo: {}\r\nSubject: Order update\r\nDate: {day:02} Nov 2026 12:00:00 +0000\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<script type=\"application/ld+json\">{value}</script><p>Purchase update.</p>", account.email);
     env.app.store.append(account.id, inbox.id, raw.as_bytes(), Flags::default(), None).await.unwrap().id
 }
 
@@ -100,4 +107,22 @@ async fn reservations_and_bills_reconcile_per_leg_and_keep_cancellations() {
     assert!(cards.iter().all(|c| c["kind"] == "reservation"));
     let bills = summary_cards::cards_for(&env.app, alice.id, bill).await.unwrap();
     assert_eq!((bills[0]["kind"].as_str(), bills[0]["bill"]["amount"]["amount"].as_str()), (Some("bill"), Some("70.00")));
+}
+
+#[tokio::test]
+async fn forged_senders_neither_create_nor_hijack_cards() {
+    let env = TestEnv::start().await;
+    env.domain("example.test").await;
+    let alice = env.account("alice@example.test").await;
+    let bill = |url: &str| json!({"@type":"Invoice","accountId":"1234","paymentDueDate":"2027-01-30","provider":{"name":"Power Co"},"totalPaymentDue":{"price":"70.00","priceCurrency":"USD"},"url":url});
+    let genuine = append(&env, &alice, "billing@power.test", bill("https://power.test/pay"), 1).await;
+    // The same bill again, from senders whose domain nothing vouches for.
+    let forged = append_with(&env, &alice, "billing@power.test", bill("https://phish.test/pay"), 2, "spf=none; dkim=none; dmarc=none").await;
+    let failed = append_with(&env, &alice, "billing@power.test", bill("https://phish.test/pay"), 3, "spf=fail smtp.mailfrom=power.test; dkim=none; dmarc=fail header.from=power.test").await;
+    drain(&env).await;
+    assert!(summary_cards::cards_for(&env.app, alice.id, forged).await.unwrap().is_empty());
+    assert!(summary_cards::cards_for(&env.app, alice.id, failed).await.unwrap().is_empty());
+    let cards = summary_cards::cards_for(&env.app, alice.id, genuine).await.unwrap();
+    assert_eq!(cards.len(), 1);
+    assert!(!cards[0].to_string().contains("phish.test"), "a forged message must not change the genuine card: {}", cards[0]);
 }

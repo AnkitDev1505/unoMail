@@ -7,6 +7,9 @@ use serde::Serialize;
 
 /// Header marking a message in which the virus scanner found something.
 pub const VIRUS_HEADER: &str = "X-Virus-Status";
+/// Header marking mail that came from a source the operator vouches for (the server itself,
+/// `UNOMAIL_TRUSTED_NETWORKS`, a trusted relay), which is accepted without sender checks.
+pub const TRUSTED_SOURCE_HEADER: &str = "X-Unomail-Trusted-Source";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Summary {
@@ -32,6 +35,9 @@ pub struct Summary {
     pub virus: Option<String>,
     /// The failed checks in words, for a warning.
     pub problems: Vec<String>,
+    /// Delivered by a source the operator vouches for, so no checks were made.
+    #[serde(skip)]
+    pub trusted_source: bool,
 }
 
 /// The header fields of a message, unfolded: (lower-case name, value).
@@ -100,6 +106,8 @@ pub fn summarize(raw: &[u8], hostname: &str) -> Summary {
         let value = without_comments_keep(value);
         value.to_ascii_lowercase().starts_with("infected").then(|| value.split_once(char::is_whitespace).map_or("", |(_, name)| name).trim().chars().filter(|c| c.is_ascii_alphanumeric() || ".-_/".contains(*c)).take(100).collect())
     });
+
+    summary.trusted_source = headers.iter().any(|(name, _)| name.eq_ignore_ascii_case(TRUSTED_SOURCE_HEADER));
 
     // The topmost Received line is the one this server wrote (if it received the message at all).
     if let Some((_, received)) = headers.iter().find(|(name, _)| name == "received") {
@@ -184,6 +192,11 @@ fn finish(mut summary: Summary) -> Summary {
         summary.problems.insert(0, format!("The virus scanner found malware in this message{}", if name.is_empty() { String::new() } else { format!(": {name}") }));
     }
     summary
+}
+
+/// The header added to mail from a trusted source (see [`TRUSTED_SOURCE_HEADER`]).
+pub fn trusted_source_header() -> String {
+    format!("{TRUSTED_SOURCE_HEADER}: yes\r\n")
 }
 
 /// The header added to a message the scanner objected to but that is delivered nonetheless.
