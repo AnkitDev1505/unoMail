@@ -1,8 +1,9 @@
 # syntax=docker/dockerfile:1
 # unoMail: mail server, web client, admin panel, Rspamd and ClamAV in one container.
+# Base images are pinned by digest (Renovate updates them): a re-pushed tag cannot change a build.
 
 # --- Web UI -------------------------------------------------------------------------------
-FROM node:26-alpine AS web
+FROM node:26-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216 AS web
 WORKDIR /build
 # npm installs the pinned pnpm on any version; later Node releases no longer ship corepack.
 RUN npm install -g pnpm@11.1.2
@@ -12,7 +13,7 @@ COPY web/ ./
 RUN pnpm run build
 
 # --- Server -------------------------------------------------------------------------------
-FROM rust:1-alpine AS server
+FROM rust:1-alpine@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 AS server
 RUN apk add --no-cache build-base cmake
 WORKDIR /build
 COPY server/Cargo.toml server/Cargo.lock ./
@@ -25,7 +26,7 @@ ARG UNOMAIL_VERSION
 RUN touch src/main.rs src/lib.rs && UNOMAIL_VERSION="${UNOMAIL_VERSION#v}" cargo build --release --locked
 
 # --- Runtime ------------------------------------------------------------------------------
-FROM alpine:3.24
+FROM alpine:3.24@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a
 RUN apk add --no-cache ca-certificates clamav clamav-daemon clamav-libunrar curl git libcap redis rspamd s6-overlay tzdata \
     && addgroup -S unomail && adduser -S -H -G unomail -h /data/unomail -s /sbin/nologin unomail \
     # Rspamd talks to ClamAV over its Unix socket.

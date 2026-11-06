@@ -1,7 +1,9 @@
 # Example deployment. Set the hostname to the public name of the mail server (its MX target).
 services:
   unomail:
-    image: ghcr.io/rikodev/unomail:latest
+    # A release line (patch releases only), not :latest: upgrading to a new minor version is a
+    # deliberate step, and a broken or tampered "latest" does not reach the server on its own.
+    image: ghcr.io/rikodev/unomail:1.1
     restart: unless-stopped
     hostname: mail.example.com
     environment:

@@ -33,7 +33,10 @@ Images: `ghcr.io/rikodev/unomail` with tags `X.Y.Z`, `X.Y` and `latest`.
 2. Back up: `docker compose exec -u unomail unomail unomail backup`. This needs a backup target
    (`UNOMAIL_BACKUP_DIR` or a bucket), which is not set by default. Keep copies of `secret.key`,
    `blob.key` and `vapid.key`.
-3. Update: `docker compose pull && docker compose up -d`
+3. Update: `docker compose pull && docker compose up -d`. This brings the patch releases of
+   the release line in `docker-compose.yml` (`1.1`); for a new minor version, change the tag
+   there first. Avoid `latest` and automatic image updaters on a mail server: a broken (or
+   tampered) release should not reach it without someone reading the notes.
 
 Migrations run at startup.
 
