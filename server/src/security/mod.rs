@@ -11,6 +11,7 @@ pub mod dkim;
 pub mod feedback;
 pub mod filter;
 pub mod outbound;
+pub mod phishing_list;
 pub mod reputation;
 pub mod rspamd;
 pub mod web_probes;

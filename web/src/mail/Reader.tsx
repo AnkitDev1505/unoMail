@@ -38,6 +38,7 @@ import { MessageMenu, UnsubscribeButton } from './MessageTools';
 import { DetailsButton, SecurityWarnings, SenderAvatar, SenderCard, useAvatarInfo } from './Sender';
 import { type Decrypted, decryptArmored, fetchKeys, isUnlocked, localPrivateKey, lookupKeys, looksEncrypted, unlock } from './pgp';
 import { buildFrameDocument, sanitizeEmail, sanitizeEmailHtml, textToHtml } from './sanitize';
+import { currentLinkSafety, listedHosts, useLinkSafety } from './linkSafety';
 
 import { t, uiLocale } from '../i18n';
 export type ReaderAction = 'reply' | 'replyAll' | 'forward';
@@ -65,7 +66,8 @@ function rawHtml(email: EmailFull): string {
 /** Sanitized HTML of a message, with inline (cid:) images resolved to downloadable blobs. */
 export function emailHtml(email: EmailFull, accountId: string, cidUrls: Record<string, string> = {}): string {
   void accountId;
-  return sanitizeEmailHtml(rawHtml(email), (cid) => cidUrls[cid.replace(/^<|>$/g, '')]);
+  // A quoted reply or a forward does not pass the trackers on either.
+  return sanitizeEmailHtml(rawHtml(email), (cid) => cidUrls[cid.replace(/^<|>$/g, '')], currentLinkSafety()?.clean_urls ?? null);
 }
 
 /** Where the OpenPGP payload of a message is, if it is encrypted. */
@@ -248,10 +250,34 @@ function MessageBody({ email, accountId, ownEmail }: { email: EmailFull; account
   }, [encryptedBlob, encryptedText, unlockedNow, accountId, email.id, sender]);
 
   const remote = showRemote || trusted;
+  const linkSafety = useLinkSafety();
+  // Hosts of this message's links found on the phishing list, mapped to the listed domain.
+  const [phishingHosts, setPhishingHosts] = useState<Record<string, string>>({});
   const rendered = useMemo(() => {
     const body = decrypted ? (decrypted.html ?? textToHtml(decrypted.text ?? '')) : rawHtml(email);
-    return sanitizeEmail(body, { resolveCid: (cid) => cidUrls[cid.replace(/^<|>$/g, '')], proxyImage: remote ? imageProxyUrl : undefined });
-  }, [email, decrypted, cidUrls, remote]);
+    return sanitizeEmail(body, {
+      resolveCid: (cid) => cidUrls[cid.replace(/^<|>$/g, '')],
+      proxyImage: remote ? imageProxyUrl : undefined,
+      cleanUrls: linkSafety?.clean_urls,
+      phishingHosts,
+    });
+  }, [email, decrypted, cidUrls, remote, linkSafety, phishingHosts]);
+  const linkHostsKey = rendered.linkHosts.join(' ');
+  useEffect(() => {
+    if (!linkSafety?.phishing_warnings || !linkHostsKey) {
+      setPhishingHosts((current) => (Object.keys(current).length ? {} : current));
+      return;
+    }
+    let cancelled = false;
+    listedHosts(linkHostsKey.split(' '))
+      .then((listed) => {
+        if (!cancelled) setPhishingHosts((current) => (JSON.stringify(current) === JSON.stringify(listed) ? current : listed));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [linkSafety, linkHostsKey]);
   const srcDoc = useMemo(
     () => buildFrameDocument(rendered.html, theme.palette.mode === 'dark', remote ? window.location.origin : ''),
     [rendered.html, theme.palette.mode, remote],
@@ -320,6 +346,11 @@ function MessageBody({ email, accountId, ownEmail }: { email: EmailFull; account
           <Chip size="small" icon={<Lock />} label={t('Decrypted')} color="success" variant="outlined" />
           {signature && <Chip size="small" label={signature.label} color={signature.color} variant="outlined" />}
         </Stack>
+      )}
+      {rendered.phishingLinks > 0 && (
+        <Alert severity="error" icon={<WarningAmber />} sx={{ mb: 1 }} data-testid="phishing-warning">
+          {t('This message links to known phishing sites. Do not enter passwords or payment details on pages opened from it.')}
+        </Alert>
       )}
       {rendered.blockedImages > 0 && !remote && (
         <Alert

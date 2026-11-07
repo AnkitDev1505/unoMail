@@ -2,7 +2,8 @@
 //!
 //! - **Links**: addresses written as IP numbers, look-alike (homograph) domains, user names in
 //!   front of the host (`https://bank.example@evil.example`), link shorteners, links whose
-//!   visible text names a different domain than they lead to, and floods of domains.
+//!   visible text names a different domain than they lead to, floods of domains, and domains
+//!   on the downloaded phishing list.
 //! - **Reputation**: what was learned about the sending network (the /24 or /48), its
 //!   autonomous system and the verified sender domain, from the server's verdicts, spam traps
 //!   and users' "spam" / "not spam" decisions.
@@ -124,8 +125,9 @@ fn text_domain(text: &str) -> Option<String> {
 }
 
 /// Link tests on the text of a message; `sender_domain` is its verified sender domain.
-pub fn link_tests(raw: &[u8], sender_domain: Option<&str>, assessment: &mut Assessment) {
-    let Some(message) = MessageParser::default().parse(raw) else { return };
+/// Returns the hosts the message links to.
+pub fn link_tests(raw: &[u8], sender_domain: Option<&str>, assessment: &mut Assessment) -> HashSet<String> {
+    let Some(message) = MessageParser::default().parse(raw) else { return HashSet::new() };
     let mut text = String::new();
     for index in 0..message.text_body().len().min(10) {
         if let Some(part) = message.body_text(index) {
@@ -199,6 +201,18 @@ pub fn link_tests(raw: &[u8], sender_domain: Option<&str>, assessment: &mut Asse
     }
     if google_redirect && !sender_domain.is_some_and(|domain| GOOGLE_DOMAINS.contains(&base_domain(&domain.to_ascii_lowercase()).as_str())) {
         assessment.add("URL_GOOGLE_REDIRECT", 2.5);
+    }
+    hosts
+}
+
+/// Links to a domain on the phishing list (see [`crate::security::phishing_list`]).
+pub fn phishing_list_test(app: &App, hosts: &HashSet<String>, assessment: &mut Assessment) {
+    let rt = app.rt();
+    if !rt.phishing_list_enabled || rt.phishing_list_score <= 0.0 {
+        return;
+    }
+    if hosts.iter().any(|host| app.phishing.matching(host, &rt.phishing_list_allow).is_some()) {
+        assessment.add("URL_PHISHING_LIST", rt.phishing_list_score);
     }
 }
 
@@ -453,7 +467,8 @@ pub async fn assess(app: &App, sender: &Sender<'_>, raw: &[u8]) -> Assessment {
     if rt.sender_reputation {
         reputation_tests(app, &mut assessment).await;
     }
-    link_tests(raw, sender.verified_domain, &mut assessment);
+    let hosts = link_tests(raw, sender.verified_domain, &mut assessment);
+    phishing_list_test(app, &hosts, &mut assessment);
     forgery_tests(raw, &mut assessment);
     assessment
 }

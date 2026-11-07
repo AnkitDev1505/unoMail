@@ -140,8 +140,15 @@ the old ones). It also has:
 | Section | Settings |
 | --- | --- |
 | Spam and reputation | Inbound/outbound checks, `[SPAM]` subject tag, quarantine of bad-karma senders |
+| Link safety | Phishing domain list (on; [Phishing Army](https://phishing.army/) by default, refreshed every 6 hours, 6 filter points, warnings in the web client, exceptions); removal of tracking parameters from links (on; the [clean-url](https://github.com/laststance/clean-url) parameter list, `utm_` prefix, exempt domains) |
 | Antivirus | Inbound/outbound scanning, quarantine, executable attachment refusal |
 | Default SMTP route | Relay host and credentials |
 | Sending | Require `From` to match the sender (on) |
 | Privacy | Strip `X-*` and `User-Agent`; hide the client in `Received:` (on) |
+
+The phishing list is downloaded by the server alone (the last good copy is kept in
+`phishing-list.txt` in the data directory); the web client checks the hosts of a message's
+links against it through this server, so nothing about the mail reaches the list's publisher.
+Lists in hosts-file or Adblock format work too. Removing tracking parameters changes the links
+shown, quoted and forwarded by the web client; the stored message is unchanged.
 | Storage | Log retention (90 days), statistics retention (400 days) |

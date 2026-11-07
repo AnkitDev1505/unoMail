@@ -124,6 +124,38 @@ pub struct Runtime {
     #[serde(default = "ai_phishing_score")]
     pub ai_phishing_score: f64,
 
+    // Link safety.
+    /// Download a list of known phishing domains and warn about links to them.
+    #[serde(default = "yes")]
+    pub phishing_list_enabled: bool,
+    /// Where the list is downloaded from: one domain per line (hosts and Adblock lists work too).
+    #[serde(default = "phishing_list_url")]
+    pub phishing_list_url: String,
+    /// Hours after which the list is downloaded again.
+    #[serde(default = "phishing_list_refresh_hours")]
+    pub phishing_list_refresh_hours: i64,
+    /// Points the built-in filter adds to incoming mail linking to a listed domain.
+    #[serde(default = "phishing_list_score")]
+    pub phishing_list_score: f64,
+    /// Mark links to listed domains in the web client and ask before they open.
+    #[serde(default = "yes")]
+    pub phishing_list_warn: bool,
+    /// Domains never treated as phishing, whatever the list says (with their subdomains).
+    #[serde(default)]
+    pub phishing_list_allow: Vec<String>,
+    /// Remove tracking parameters from links in messages shown in the web client.
+    #[serde(default = "yes")]
+    pub clean_urls_enabled: bool,
+    /// Query parameters removed from links (compared without regard to case).
+    #[serde(default = "clean_url_params")]
+    pub clean_url_params: Vec<String>,
+    /// Query parameters starting with one of these are removed too.
+    #[serde(default = "clean_url_prefixes")]
+    pub clean_url_prefixes: Vec<String>,
+    /// Links to these domains (and their subdomains) are left as they are.
+    #[serde(default)]
+    pub clean_url_exempt_domains: Vec<String>,
+
     // Antivirus.
     #[serde(default = "yes")]
     pub antivirus_inbound: bool,
@@ -261,6 +293,49 @@ fn ai_phishing_score() -> f64 {
     4.0
 }
 
+fn phishing_list_url() -> String {
+    crate::security::phishing_list::DEFAULT_URL.into()
+}
+
+fn phishing_list_refresh_hours() -> i64 {
+    6
+}
+
+fn phishing_list_score() -> f64 {
+    6.0
+}
+
+/// The tracking parameters removed by clean-url (<https://github.com/laststance/clean-url>).
+pub const CLEAN_URL_PARAMS: &[&str] = &[
+    // Campaigns.
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "utm_nooverride", "utm_ad",
+    // Social networks.
+    "fbclid", "igshid", "ttclid", "tiktok_r", "li_fat_id", "mkt_tok", "trk",
+    // Advertising.
+    "gclid", "yclid", "dclid", "msclkid", "gad_source", "gad_campaignid", "gbraid", "matchtype", "campaign_id", "ad_id",
+    // Affiliates and referrals.
+    "ref", "referral", "referrer", "affiliate_id", "afid", "click_id", "clickid", "subid", "sub_id", "partner_id", "sr_share",
+    // Amazon.
+    "tag", "linkcode", "linkid", "ascsubtag", "camp", "creative", "pd_rd_i", "pd_rd_r", "pd_rd_w", "pd_rd_wg",
+    // Newsletters.
+    "ck_subscriber_id", "mc_cid", "mc_eid", "_hsenc", "_hsmi",
+    // Others.
+    "sthash", "source", "campaign", "adgroup", "adposition", "_bhlid",
+];
+
+fn clean_url_params() -> Vec<String> {
+    CLEAN_URL_PARAMS.iter().map(|p| (*p).to_owned()).collect()
+}
+
+fn clean_url_prefixes() -> Vec<String> {
+    vec!["utm_".into()]
+}
+
+/// A query parameter name as the settings accept it.
+fn valid_param(name: &str) -> bool {
+    (1..=64).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-.[]".contains(&b))
+}
+
 fn spam_subject_prefix() -> String {
     "[SPAM]".into()
 }
@@ -385,6 +460,30 @@ impl Runtime {
         }
         if let Some(bad) = self.penalized_countries.iter().find(|c| c.len() != 2 || !c.bytes().all(|b| b.is_ascii_uppercase())) {
             return Err(format!("countries are two-letter codes in capitals, like DE: {}", crate::util::sanitize_line(bad)));
+        }
+        let url = self.phishing_list_url.as_str();
+        if url.len() > 500 || !(url.starts_with("https://") || url.starts_with("http://")) || url.chars().any(|c| c.is_control() || c.is_whitespace()) || reqwest::Url::parse(url).is_err() {
+            return Err("the phishing list address must be an http(s) URL".into());
+        }
+        if !(1..=168).contains(&self.phishing_list_refresh_hours) {
+            return Err("the phishing list must be refreshed every 1 to 168 hours".into());
+        }
+        if !self.phishing_list_score.is_finite() || !(0.0..=100.0).contains(&self.phishing_list_score) {
+            return Err("the points for a link to a phishing domain must be between 0 and 100".into());
+        }
+        for (name, domains) in [("phishing exceptions", &self.phishing_list_allow), ("exempt domains", &self.clean_url_exempt_domains)] {
+            if domains.len() > 1000 {
+                return Err(format!("at most 1000 {name} are supported"));
+            }
+            if let Some(bad) = domains.iter().find(|d| normalize_domain(d).as_deref() != Some(d.as_str())) {
+                return Err(format!("invalid domain in {name}: {}", crate::util::sanitize_line(bad)));
+            }
+        }
+        if self.clean_url_params.len() > 1000 || self.clean_url_prefixes.len() > 100 {
+            return Err("too many tracking parameters or prefixes".into());
+        }
+        if let Some(bad) = self.clean_url_params.iter().chain(&self.clean_url_prefixes).find(|p| !valid_param(p)) {
+            return Err(format!("tracking parameters are lower-case names like utm_source: {}", crate::util::sanitize_line(bad)));
         }
         let prefix = self.spam_subject_prefix.trim();
         if prefix.is_empty() || prefix.chars().count() > 40 || prefix.chars().any(char::is_control) {
@@ -587,6 +686,15 @@ mod tests {
             json!({ "login_window_mins": 120, "login_max_lock_hours": 1 }),
             json!({ "captcha_provider": "geetest" }),
             json!({ "captcha_site_key": "<script>" }),
+            json!({ "phishing_list_url": "ftp://list.example/x" }),
+            json!({ "phishing_list_url": "https://list example/x" }),
+            json!({ "phishing_list_refresh_hours": 0 }),
+            json!({ "phishing_list_score": -1 }),
+            json!({ "phishing_list_allow": ["Example.com"] }),
+            json!({ "clean_url_params": ["UTM_SOURCE"] }),
+            json!({ "clean_url_params": ["a=b"] }),
+            json!({ "clean_url_prefixes": [""] }),
+            json!({ "clean_url_exempt_domains": ["not a domain"] }),
         ] {
             assert!(base.with_overrides(bad.as_object().unwrap()).is_err(), "{bad}");
         }

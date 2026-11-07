@@ -239,6 +239,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(unomail::sysstat::run(app.clone()));
     tokio::spawn(unomail::dailystats::run(app.clone()));
     tokio::spawn(unomail::security::reputation::monitor(app.clone()));
+    tokio::spawn(unomail::security::phishing_list::run(app.clone()));
     tokio::spawn(unomail::security::reputation::report_offenders(app.clone()));
 
     let router = api::router(app.clone());

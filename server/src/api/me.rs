@@ -31,6 +31,37 @@ pub async fn sending(State(state): State<AppState>, session: Session) -> JsonRes
     Ok(Json(json!({ "sent_messages": messages, "sent_recipients": recipients, "max_messages_per_hour": max_messages, "max_recipients_per_hour": max_recipients, "blocked": blocked })))
 }
 
+/// How the web client treats links in messages: which tracking parameters it removes, and
+/// whether it asks about links to known phishing domains.
+pub async fn link_safety(State(state): State<AppState>, _session: Session) -> JsonResult<Value> {
+    let rt = state.rt();
+    let clean = rt.clean_urls_enabled.then(|| json!({ "params": rt.clean_url_params, "prefixes": rt.clean_url_prefixes, "exempt_domains": rt.clean_url_exempt_domains }));
+    Ok(Json(json!({ "phishing_warnings": rt.phishing_list_enabled && rt.phishing_list_warn, "clean_urls": clean })))
+}
+
+#[derive(Deserialize)]
+pub struct LinkCheck {
+    hosts: Vec<String>,
+}
+
+/// Which of the hosts of a message's links belong to known phishing domains: `{ host: domain }`.
+/// The hosts stay on this server; the list was downloaded beforehand.
+pub async fn link_check(State(state): State<AppState>, _session: Session, Json(input): Json<LinkCheck>) -> JsonResult<Value> {
+    if input.hosts.len() > 1000 || input.hosts.iter().any(|host| host.len() > 253) {
+        return Err(ApiError::bad("at most 1000 hosts of up to 253 characters"));
+    }
+    let rt = state.rt();
+    let mut listed = serde_json::Map::new();
+    if rt.phishing_list_enabled && rt.phishing_list_warn {
+        for host in &input.hosts {
+            if let Some(domain) = state.phishing.matching(host, &rt.phishing_list_allow) {
+                listed.insert(host.clone(), json!(domain));
+            }
+        }
+    }
+    Ok(Json(json!({ "listed": listed })))
+}
+
 pub async fn vacation_get(State(state): State<AppState>, session: Session) -> JsonResult<Vacation> {
     Ok(Json(vacation::load(&state, session.account.id).await?))
 }

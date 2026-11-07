@@ -68,7 +68,8 @@ it can read everything except OpenPGP mail encrypted to keys the server never ho
   and documents carrying exploits or macros are only caught by a virus scanner: keep ClamAV
   (or Rspamd's antivirus module) enabled. The warnings appear in this web client only; IMAP
   and POP3 clients get the messages as they are. A look-alike domain written in plain ASCII
-  (`paypa1.com`) is not detected unless the link text names a different domain.
+  (`paypa1.com`) is not detected unless the link text names a different domain, or the domain
+  is on the downloaded phishing list (which, like any blocklist, lags behind new sites).
 
 ## 4. Production checklist
 

@@ -108,3 +108,27 @@ describe('text helpers', () => {
     expect(htmlToText('<p>Hello <b>world</b></p><p>Second<br>line</p>')).toBe('Hello world\nSecond\nline');
   });
 });
+
+describe('link safety', () => {
+  const rules = { params: ['fbclid'], prefixes: ['utm_'], exempt_domains: [] };
+
+  it('removes tracking parameters before links are shown or quoted', () => {
+    const html = '<a href="https://shop.example/a?id=1&amp;utm_source=mail&amp;fbclid=x">Shop</a>';
+    const out = sanitizeEmail(html, { cleanUrls: rules });
+    expect(out.removedTrackers).toBe(2);
+    expect(out.html).toContain('href="https://shop.example/a?id=1"');
+    expect(out.html).toContain('title="https://shop.example/a?id=1"');
+    expect(sanitizeEmailHtml(html, undefined, rules)).not.toContain('utm_source');
+    expect(sanitizeEmail(html).html, 'nothing is removed without rules').toContain('utm_source');
+  });
+
+  it('reports link hosts and marks links to listed phishing domains', () => {
+    const html = '<a href="https://Login.Evil.example/x">Your bank</a> <a href="https://fine.example/">ok</a> <a href="mailto:a@b.example">mail</a>';
+    expect(sanitizeEmail(html).linkHosts.sort()).toEqual(['fine.example', 'login.evil.example']);
+    const out = sanitizeEmail(html, { phishingHosts: { 'login.evil.example': 'evil.example' } });
+    expect(out.phishingLinks).toBe(1);
+    const doc = new DOMParser().parseFromString(out.html, 'text/html');
+    expect(doc.querySelector('a[href^="https://Login"]')?.getAttribute('data-unomail-warning')).toContain('known phishing sites (evil.example)');
+    expect(doc.querySelector('a[href="https://fine.example/"]')?.hasAttribute('data-unomail-warning')).toBe(false);
+  });
+});

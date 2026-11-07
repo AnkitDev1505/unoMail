@@ -1,8 +1,8 @@
 // Global server configuration: settings that can be changed while the server runs.
 
 import { Alert, Box, Button, Card, CardContent, Chip, FormControlLabel, MenuItem, Stack, Switch, TableBody, TableCell, TableRow, TextField, Typography } from '@mui/material';
-import { useState } from 'react';
-import { del, get, patch, put } from '../lib/api';
+import { type ReactNode, useState } from 'react';
+import { del, formatTime, get, patch, post, put } from '../lib/api';
 import { PageHeader, useAction, useLoad, ScrollTable } from './common';
 
 import { t } from '../i18n';
@@ -33,7 +33,9 @@ interface Field {
   patternHint?: string;
   maxLength?: number;
   /** For lists: what each item is (default: a DNS zone). */
-  items?: 'zone' | 'country' | 'asn' | 'address';
+  items?: 'zone' | 'country' | 'asn' | 'address' | 'param';
+  /** For lists: a larger box, for long lists. */
+  multiline?: boolean;
   /** Shown only while these switches are on. */
   dependsOn?: string[];
   /** Shown only for these values of the first `dependsOn` setting. */
@@ -46,6 +48,8 @@ interface Group {
   fields: Field[];
   /** A remark depending on the current values (for example a setting that is incomplete). */
   note?: (values: Values) => string | null;
+  /** Shown below the fields, for example the state of something the settings control. */
+  footer?: (values: Values) => ReactNode;
 }
 
 const GROUPS: Group[] = [
@@ -101,6 +105,32 @@ const GROUPS: Group[] = [
       { key: 'ai_phishing_min_score', label: t('Ask from score'), help: t('Only mail the other tests already score at least this much is shown to the model'), kind: 'decimal', min: 0, max: 100, dependsOn: ['native_filter', 'ai_phishing_check'] },
       { key: 'ai_phishing_score', label: t('Points for a phishing verdict'), help: t('Added when the model judges a message phishing'), kind: 'decimal', min: 0, max: 20, dependsOn: ['native_filter', 'ai_phishing_check'] },
     ],
+  },
+  {
+    title: t('Link safety'),
+    description: t('Warnings about links to known phishing sites, and removal of tracking parameters (utm_source, fbclid, …) from links in messages shown in the web client.'),
+    fields: [
+      { key: 'phishing_list_enabled', label: t('Use a phishing domain list'), help: t('Download a list of known phishing domains (Phishing Army by default) and check links against it. Only the list is downloaded; nothing about your mail is sent.'), kind: 'bool' },
+      {
+        key: 'phishing_list_url',
+        label: t('List address'),
+        help: t('One domain per line; hosts files and Adblock lists work too'),
+        kind: 'text',
+        maxLength: 500,
+        pattern: /^https?:\/\/\S+$/i,
+        patternHint: t('Enter an http(s) address'),
+        dependsOn: ['phishing_list_enabled'],
+      },
+      { key: 'phishing_list_refresh_hours', label: t('Refresh every (hours)'), help: t('The list is downloaded again after this long'), kind: 'number', min: 1, max: 168, dependsOn: ['phishing_list_enabled'] },
+      { key: 'phishing_list_warn', label: t('Warn in the web client'), help: t('Mark links to listed domains and ask before they open'), kind: 'bool', dependsOn: ['phishing_list_enabled'] },
+      { key: 'phishing_list_score', label: t('Points for a listed link'), help: t('Added by the built-in spam filter to incoming mail linking to a listed domain; 0 only warns'), kind: 'decimal', min: 0, max: 100, dependsOn: ['phishing_list_enabled'] },
+      { key: 'phishing_list_allow', label: t('Never treat as phishing'), help: t('Comma separated domains, with their subdomains, that are never flagged whatever the list says'), kind: 'list', items: 'zone', dependsOn: ['phishing_list_enabled'] },
+      { key: 'clean_urls_enabled', label: t('Remove tracking from links'), help: t('Strip tracking parameters from links when messages are shown, quoted or forwarded'), kind: 'bool' },
+      { key: 'clean_url_params', label: t('Tracking parameters'), help: t('Comma separated parameter names removed from links; the default is the list of clean-url'), kind: 'list', items: 'param', multiline: true, dependsOn: ['clean_urls_enabled'] },
+      { key: 'clean_url_prefixes', label: t('Parameter prefixes'), help: t('Parameters starting with one of these are removed too, e.g. utm_'), kind: 'list', items: 'param', dependsOn: ['clean_urls_enabled'] },
+      { key: 'clean_url_exempt_domains', label: t('Leave links to these domains'), help: t('Comma separated domains, with their subdomains, whose links are never changed'), kind: 'list', items: 'zone', dependsOn: ['clean_urls_enabled'] },
+    ],
+    footer: (values) => (values.phishing_list_enabled ? <PhishingListStatus /> : null),
   },
   {
     title: t('Antivirus'),
@@ -251,7 +281,7 @@ function parse(field: Field, text: string): { value?: number | string | string[]
   }
   if (field.kind === 'list') {
     const kind = field.items ?? 'zone';
-    const items = text.split(',').map((item) => (kind === 'country' ? item.trim().toUpperCase() : item.trim().toLowerCase())).filter(Boolean);
+    const items = text.split(/[,\n]/).map((item) => (kind === 'country' ? item.trim().toUpperCase() : item.trim().toLowerCase())).filter(Boolean);
     const bad = items.find((item) => !LIST_ITEM[kind].pattern.test(item));
     return bad ? { error: LIST_ITEM[kind].error(bad) } : { value: items };
   }
@@ -266,7 +296,51 @@ const LIST_ITEM: Record<NonNullable<Field['items']>, { pattern: RegExp; error: (
   country: { pattern: /^[A-Z]{2}$/, error: (item) => t('“{{item}}” is not a two-letter country code', { item }) },
   asn: { pattern: /^(0|[1-9]\d{0,9})$/, error: (item) => t('“{{item}}” is not a network number', { item }) },
   address: { pattern: /^[^\s@,]+@[^\s@,]+\.[^\s@,]+$/, error: (item) => t('“{{item}}” is not an email address', { item }) },
+  param: { pattern: /^[a-z0-9_.\-[\]]{1,64}$/, error: (item) => t('“{{item}}” is not a parameter name', { item }) },
 };
+
+interface PhishingList {
+  entries: number;
+  updated_at: number;
+  source: string;
+  checked_at: number;
+  error: string | null;
+}
+
+/** How many domains the phishing list holds, when it was downloaded, and a way to refresh it. */
+function PhishingListStatus() {
+  const { data, reload } = useLoad(() => get<PhishingList>('/api/admin/phishing-list'), []);
+  const { run, feedback } = useAction();
+  if (!data) return null;
+  return (
+    <Box sx={{ mt: 1 }}>
+      {feedback}
+      <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
+        <Typography variant="body2" sx={{ color: 'text.secondary' }} data-testid="phishing-list-status">
+          {data.entries > 0
+            ? t('Domains on the list: {{entries}} (downloaded {{time}})', { entries: data.entries.toLocaleString(), time: formatTime(data.updated_at) })
+            : t('No list downloaded yet.')}
+        </Typography>
+        <Button
+          size="small"
+          onClick={async () => {
+            if (!(await run(() => post('/api/admin/phishing-list/refresh'), t('Download started')))) return;
+            // Until the attempt has finished: downloaded (updated = checked) or failed.
+            for (let i = 0; i < 60; i += 1) {
+              await new Promise((resolve) => window.setTimeout(resolve, 1000));
+              const now = await get<PhishingList>('/api/admin/phishing-list').catch(() => null);
+              if (now && now.checked_at !== data.checked_at && (now.updated_at === now.checked_at || now.error)) break;
+            }
+            await reload();
+          }}
+        >
+          {t('Download now')}
+        </Button>
+      </Stack>
+      {data.error && <Alert severity="warning" sx={{ mt: 1 }}>{t('The last download failed: {{error}}', { error: data.error })}</Alert>}
+    </Box>
+  );
+}
 
 interface GlobalScript {
   name: string;
@@ -359,6 +433,7 @@ export function ServerSettings() {
               </Typography>
             )}
             {note && <Alert severity="warning" sx={{ mt: 1 }}>{note}</Alert>}
+            {group.footer?.(data.values)}
             <ScrollTable size="small" aria-label={group.title} sx={{ mt: 1, '& tr:last-of-type td': { borderBottom: 0 } }}>
               <TableBody>
                 {group.fields
@@ -403,6 +478,8 @@ export function ServerSettings() {
                               error={Boolean(parsed.error)}
                               helperText={parsed.error ?? (field.kind === 'secret' ? (data.secrets_set?.[field.key] ? t('A password is stored. Save an empty field to remove it.') : t('No password stored')) : undefined)}
                               type={field.kind === 'secret' ? 'password' : 'text'}
+                              multiline={field.multiline}
+                              maxRows={field.multiline ? 6 : undefined}
                               autoComplete={field.kind === 'secret' ? 'new-password' : 'off'}
                               placeholder={field.kind === 'secret' && data.secrets_set?.[field.key] ? '••••••••' : undefined}
                               sx={{ flex: 1, minWidth: 0, maxWidth: field.kind === 'list' || field.kind === 'text' || field.kind === 'secret' ? 340 : 160 }}

@@ -189,6 +189,8 @@ pub struct App {
     pub abuse: crate::security::reputation::AbuseQueue,
     /// Recent requests for other software's web paths, per address.
     pub web_probes: crate::security::web_probes::WebProbes,
+    /// Known phishing domains, refreshed in the background.
+    pub phishing: crate::security::phishing_list::PhishingList,
     /// Passkey challenges waiting for an answer.
     pub challenges: crate::twofactor::Challenges,
     /// Single sign-on discovery, pending sign-ins and verified tokens.
@@ -294,6 +296,7 @@ impl App {
             limiter,
             abuse,
             web_probes: Default::default(),
+            phishing: Default::default(),
             challenges: Default::default(),
             oauth: Default::default(),
             metrics,

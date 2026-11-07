@@ -14,6 +14,7 @@
 // positioning (which could lay a fake dialog or link over it) are removed as well.
 
 import DOMPurify from 'dompurify';
+import { type CleanRules, cleanUrl } from './cleanUrl';
 import { linkWarning } from './risk';
 
 import { t } from '../i18n';
@@ -28,6 +29,10 @@ export interface SanitizeOptions {
   proxyImage?: (url: string) => string;
   /** The result goes into the application page, not the sandboxed reader frame. */
   forEditor?: boolean;
+  /** Tracking parameters to remove from links. */
+  cleanUrls?: CleanRules | null;
+  /** Link hosts on the phishing list (lower case), mapped to the listed domain. */
+  phishingHosts?: Record<string, string>;
 }
 
 /** Properties that let content leave its place in the flow and cover other parts of the page. */
@@ -37,6 +42,21 @@ export interface Sanitized {
   html: string;
   /** Number of remote images that were blocked. */
   blockedImages: number;
+  /** Hosts of the web links, lower case, for a check against the phishing list. */
+  linkHosts: string[];
+  /** Links to hosts on the phishing list. */
+  phishingLinks: number;
+  /** Tracking parameters removed from links. */
+  removedTrackers: number;
+}
+
+function linkHost(href: string): string | null {
+  try {
+    const url = new URL(href);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.hostname.toLowerCase() : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Sanitizes HTML and reports how many remote images were held back. */
@@ -49,14 +69,32 @@ export function sanitizeEmail(html: string, options: SanitizeOptions = {}): Sani
     RETURN_DOM: true,
   }) as unknown as HTMLElement;
 
+  const hosts = new Set<string>();
+  let phishingLinks = 0;
+  let removedTrackers = 0;
   clean.querySelectorAll('a').forEach((link) => {
-    const href = link.getAttribute('href') ?? '';
-    if (SAFE_LINK.test(href.trim())) {
+    let href = (link.getAttribute('href') ?? '').trim();
+    if (SAFE_LINK.test(href)) {
+      // Tracking parameters go before anything else looks at the address.
+      if (options.cleanUrls) {
+        const cleaned = cleanUrl(href, options.cleanUrls);
+        if (cleaned.removed) {
+          href = cleaned.url;
+          removedTrackers += cleaned.removed;
+          link.setAttribute('href', href);
+        }
+      }
       link.setAttribute('target', '_blank');
       link.setAttribute('rel', 'noopener noreferrer nofollow');
       // The real destination on hover, and a marked link when it is not what it claims to be.
-      link.setAttribute('title', href.trim());
-      const warning = linkWarning(href.trim(), link.textContent ?? '');
+      link.setAttribute('title', href);
+      const host = linkHost(href);
+      if (host) hosts.add(host);
+      const listed = host ? options.phishingHosts?.[host] : undefined;
+      if (listed) phishingLinks += 1;
+      const warning = listed
+        ? t('{{host}} is on a list of known phishing sites ({{domain}}). Such pages imitate familiar websites to steal passwords and payment details.', { host, domain: listed })
+        : linkWarning(href, link.textContent ?? '');
       if (warning) link.setAttribute('data-unomail-warning', warning);
     } else {
       link.removeAttribute('href');
@@ -102,15 +140,15 @@ export function sanitizeEmail(html: string, options: SanitizeOptions = {}): Sani
       else el.removeAttribute('style');
     });
   }
-  return { html: clean.innerHTML, blockedImages };
+  return { html: clean.innerHTML, blockedImages, linkHosts: [...hosts], phishingLinks, removedTrackers };
 }
 
 /**
  * Returns sanitized HTML for the application page (the composer, signatures, quoted replies).
  * `resolveCid` maps a Content-ID to a blob/data URL for inline images.
  */
-export function sanitizeEmailHtml(html: string, resolveCid: (cid: string) => string | undefined = () => undefined): string {
-  return sanitizeEmail(html, { resolveCid, forEditor: true }).html;
+export function sanitizeEmailHtml(html: string, resolveCid: (cid: string) => string | undefined = () => undefined, cleanUrls: CleanRules | null = null): string {
+  return sanitizeEmail(html, { resolveCid, forEditor: true, cleanUrls }).html;
 }
 
 /**

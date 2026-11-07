@@ -78,6 +78,22 @@ pub async fn settings_patch(State(state): State<AppState>, session: Session, Jso
     Ok(Json(settings_json(&state).await?))
 }
 
+/// State of the downloaded phishing domain list.
+pub async fn phishing_list_status(State(state): State<AppState>, session: Session) -> JsonResult<crate::security::phishing_list::Status> {
+    session.require_super()?;
+    Ok(Json(state.phishing.status()))
+}
+
+/// Downloads the phishing domain list now, in the background.
+pub async fn phishing_list_refresh(State(state): State<AppState>, session: Session) -> JsonResult<Value> {
+    session.require_super()?;
+    if !state.rt().phishing_list_enabled {
+        return Err(ApiError::bad("the phishing list is switched off"));
+    }
+    state.phishing.refresh_now();
+    Ok(Json(json!({ "started": true })))
+}
+
 // --- DMARC reports -------------------------------------------------------------------------
 
 #[derive(Deserialize)]

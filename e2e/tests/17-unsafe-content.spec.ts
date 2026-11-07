@@ -1,5 +1,7 @@
 import { expect, test } from '@playwright/test';
-import { DOMAIN, login, openAdmin, smtpDeliver, USER_PASSWORD } from './helpers';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { DOMAIN, login, logout, openAdmin, smtpDeliver, USER_PASSWORD } from './helpers';
 
 // A mailbox of its own, so these messages do not show up in the other specs.
 const ERIN = `erin@${DOMAIN}`;
@@ -100,5 +102,51 @@ test.describe('unsafe content', () => {
     await expect(page.getByTestId('virus-scanner-status')).toContainText('not scanned for malware', { timeout: 30_000 });
     await openAdmin(page, 'Server settings');
     await expect(page.getByLabel('Refuse executable attachments')).toBeChecked();
+  });
+
+  test('links to listed phishing domains are flagged and tracking parameters removed', async ({ page }) => {
+    // A feed of our own instead of Phishing Army, so the run needs no internet.
+    const feed = createServer((_request, response) => response.end('# e2e feed\nphish.test\n'));
+    await new Promise<void>((resolve) => feed.listen(0, '127.0.0.1', resolve));
+    const feedUrl = `http://127.0.0.1:${(feed.address() as AddressInfo).port}/list.txt`;
+    try {
+      await login(page, ADMIN_EMAIL, ADMIN_PASSWORD);
+      await openAdmin(page, 'Server settings');
+      await page.getByRole('textbox', { name: 'List address' }).fill(feedUrl);
+      await page.getByRole('row', { name: /List address/ }).getByRole('button', { name: 'Save' }).click();
+      await expect(page.getByText('Setting saved')).toBeVisible();
+      await page.getByRole('button', { name: 'Download now' }).click();
+      await expect(page.getByTestId('phishing-list-status')).toContainText('Domains on the list: 1', { timeout: 20_000 });
+      await logout(page);
+
+      await smtpDeliver('news@shop.test', ERIN, [
+        'From: Shop <news@shop.test>',
+        `To: ${ERIN}`,
+        'Subject: Verify your account',
+        'MIME-Version: 1.0',
+        'Content-Type: text/html; charset=utf-8',
+        '',
+        '<p><a href="https://login.phish.test/verify">Verify now</a></p>',
+        '<p><a href="https://shop.test/offer?id=7&amp;utm_source=newsletter&amp;fbclid=abc">Our offer</a></p>',
+        '',
+      ].join('\n'));
+      await login(page, ERIN, USER_PASSWORD);
+      await page.getByTestId('email-row').filter({ hasText: 'Verify your account' }).click();
+      await expect(page.getByTestId('phishing-warning')).toContainText('known phishing sites');
+
+      const body = page.frameLocator('iframe[title="Message body"]');
+      await expect(body.getByRole('link', { name: 'Our offer' })).toHaveAttribute('href', 'https://shop.test/offer?id=7');
+      await body.getByRole('link', { name: 'Verify now' }).click();
+      const linkDialog = page.getByRole('dialog', { name: 'Careful with this link' });
+      await expect(linkDialog).toContainText('login.phish.test is on a list of known phishing sites (phish.test)');
+      await linkDialog.getByRole('button', { name: 'Cancel' }).click();
+    } finally {
+      feed.close();
+    }
+    // Back to the default list for the specs that follow.
+    await login(page, ADMIN_EMAIL, ADMIN_PASSWORD);
+    await openAdmin(page, 'Server settings');
+    await page.getByRole('button', { name: 'Reset List address' }).click();
+    await expect(page.getByText('Reset to default')).toBeVisible();
   });
 });

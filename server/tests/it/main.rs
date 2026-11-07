@@ -27,6 +27,7 @@ mod jmap;
 mod jmap_groupware;
 mod jmap_push;
 mod ldap_live;
+mod link_safety;
 mod lists;
 mod lmtp;
 mod mail_features;
